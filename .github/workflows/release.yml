@@ -116,6 +116,21 @@ on:
         required: false
         type: string
         default: "ractive/scoop-bucket"
+      aur-package:
+        description: "AUR package name, e.g. hyalo-bin. Empty skips AUR."
+        required: false
+        type: string
+        default: ""
+      aur-maintainer:
+        description: "Rendered as the '# Maintainer:' PKGBUILD comment."
+        required: false
+        type: string
+        default: "Jean-Pierre Bergamin <james@ractive.ch>"
+      cloudsmith-repo:
+        description: "Cloudsmith org/repo slug, e.g. ractive/cli. Empty skips Cloudsmith."
+        required: false
+        type: string
+        default: ""
       dry-run:
         description: "Build, test, package and upload as workflow artifacts only. Skips tag verification, GitHub release upload, crates.io, Homebrew, Scoop, winget and attestation."
         required: false
@@ -1029,3 +1044,231 @@ jobs:
           identifier: ${{ inputs.winget-identifier }}
           installers-regex: '${{ inputs.bin-name }}-.*-pc-windows-msvc\.zip$'
           token: ${{ secrets.WINGET_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # 11. AUR (conditional, skipped in dry-run, non-blocking)
+  # ---------------------------------------------------------------------
+  aur:
+    needs: [release, version-check]
+    if: inputs.aur-package != '' && !inputs.dry-run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # A bad AUR push (e.g. a malformed PKGBUILD) shouldn't fail the whole
+    # release — same non-blocking stance as winget.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Verify AUR_SSH_PRIVATE_KEY is set
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${AUR_SSH_PRIVATE_KEY}" ]; then
+            echo "ERROR: AUR_SSH_PRIVATE_KEY secret is not set" >&2
+            exit 1
+          fi
+
+      - name: Download SHA256SUMS from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_EVENT_RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          gh release download "${GITHUB_EVENT_RELEASE_TAG_NAME}" \
+            --pattern "SHA256SUMS" --dir .
+
+      - name: Generate PKGBUILD
+        env:
+          BIN_NAME: ${{ inputs.bin-name }}
+          AUR_PACKAGE: ${{ inputs.aur-package }}
+          AUR_MAINTAINER: ${{ inputs.aur-maintainer }}
+          FORMULA_DESCRIPTION: ${{ inputs.homebrew-description }}
+          CARGO_DESCRIPTION: ${{ needs.version-check.outputs.description }}
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Same precedence as the Homebrew formula desc / Scoop description.
+          PKGDESC="${FORMULA_DESCRIPTION:-${CARGO_DESCRIPTION:-${BIN_NAME} CLI}}"
+          REPO="${GITHUB_REPOSITORY}"
+          RELEASE_URL="https://github.com/${REPO}/releases/download"
+
+          get_sha() {
+            awk -v file="$1" '$2 == file {print $1}' SHA256SUMS
+          }
+
+          # Same musl-first-else-gnu preference as the Homebrew job, applied
+          # to both arches (AUR has no separate "Intel vs ARM" split like
+          # Homebrew's on_intel/on_arm — both go in one PKGBUILD).
+          find_linux_artifact() {
+            local arch="$1"
+            local musl_name="${BIN_NAME}-v${VERSION}-${arch}-unknown-linux-musl.tar.gz"
+            local gnu_name="${BIN_NAME}-v${VERSION}-${arch}-unknown-linux-gnu.tar.gz"
+            if grep -q " $musl_name\$" SHA256SUMS; then
+              echo "$musl_name"
+            elif grep -q " $gnu_name\$" SHA256SUMS; then
+              echo "$gnu_name"
+            else
+              echo ""
+            fi
+          }
+
+          X86_FILE=$(find_linux_artifact x86_64)
+          ARM64_FILE=$(find_linux_artifact aarch64)
+
+          SHA_X86=""
+          SHA_ARM64=""
+          [ -n "$X86_FILE" ] && SHA_X86=$(get_sha "$X86_FILE")
+          [ -n "$ARM64_FILE" ] && SHA_ARM64=$(get_sha "$ARM64_FILE")
+
+          if [ -z "$SHA_X86" ] && [ -z "$SHA_ARM64" ]; then
+            echo "ERROR: no Linux artifacts found in SHA256SUMS for PKGBUILD" >&2
+            exit 1
+          fi
+
+          ARCHES=()
+          [ -n "$SHA_X86" ] && ARCHES+=("x86_64")
+          [ -n "$SHA_ARM64" ] && ARCHES+=("aarch64")
+          ARCH_LIST=()
+          for a in "${ARCHES[@]}"; do
+            ARCH_LIST+=("'$a'")
+          done
+
+          {
+            echo "# Maintainer: ${AUR_MAINTAINER}"
+            echo "# Auto-updated by the release workflow in ${REPO}."
+            echo "pkgname=${AUR_PACKAGE}"
+            echo "_bin=${BIN_NAME}"
+            echo "pkgver=${VERSION}"
+            echo "pkgrel=1"
+            echo "pkgdesc=\"${PKGDESC}\""
+            IFS=" "
+            echo "arch=(${ARCH_LIST[*]})"
+            unset IFS
+            echo "url=\"https://github.com/${REPO}\""
+            echo "license=('MIT')"
+            echo "provides=(\"\$_bin\")"
+            echo "conflicts=(\"\$_bin\")"
+            if [ -n "$SHA_X86" ]; then
+              echo "source_x86_64=(\"${RELEASE_URL}/v\${pkgver}/${X86_FILE}\")"
+              echo "sha256sums_x86_64=('${SHA_X86}')"
+            fi
+            if [ -n "$SHA_ARM64" ]; then
+              echo "source_aarch64=(\"${RELEASE_URL}/v\${pkgver}/${ARM64_FILE}\")"
+              echo "sha256sums_aarch64=('${SHA_ARM64}')"
+            fi
+            echo ""
+            echo "package() {"
+            echo "  install -Dm755 \"\$_bin\" \"\$pkgdir/usr/bin/\$_bin\""
+            # makepkg runs with errexit — `[ -f x ] && cmd` fails the whole
+            # function (via `&&`'s exit status) when the file is absent, so
+            # every optional install uses an explicit if/then instead. These
+            # paths exist in hoppy's tarballs (root-level completions/ and
+            # man/) and are absent for hyalo/ff-rdp; the conditionals let one
+            # PKGBUILD serve all three.
+            echo "  if [ -f LICENSE ]; then"
+            echo "    install -Dm644 LICENSE \"\$pkgdir/usr/share/licenses/\$pkgname/LICENSE\""
+            echo "  fi"
+            echo "  if [ -f README.md ]; then"
+            echo "    install -Dm644 README.md \"\$pkgdir/usr/share/doc/\$pkgname/README.md\""
+            echo "  fi"
+            echo "  if [ -f \"completions/\$_bin.bash\" ]; then"
+            echo "    install -Dm644 \"completions/\$_bin.bash\" \"\$pkgdir/usr/share/bash-completion/completions/\$_bin\""
+            echo "  fi"
+            echo "  if [ -f \"completions/_\$_bin\" ]; then"
+            echo "    install -Dm644 \"completions/_\$_bin\" \"\$pkgdir/usr/share/zsh/site-functions/_\$_bin\""
+            echo "  fi"
+            echo "  if [ -f \"completions/\$_bin.fish\" ]; then"
+            echo "    install -Dm644 \"completions/\$_bin.fish\" \"\$pkgdir/usr/share/fish/vendor_completions.d/\$_bin.fish\""
+            echo "  fi"
+            echo "  if compgen -G \"man/*.1\" > /dev/null; then"
+            echo "    for m in man/*.1; do"
+            echo "      install -Dm644 \"\$m\" \"\$pkgdir/usr/share/man/man1/\$(basename \"\$m\")\""
+            echo "    done"
+            echo "  fi"
+            echo "}"
+          } > PKGBUILD
+
+          cat PKGBUILD
+
+      - name: Publish to AUR
+        # First push auto-creates the AUR package. The AUR account owning
+        # aur-ssh-private-key's public counterpart must already have that
+        # public key registered at https://aur.archlinux.org/account/ (SSH
+        # Public Key field) before this can push.
+        uses: KSXGitHub/github-actions-deploy-aur@da03e160361ce01bf087e790b6ffd196d7dccff7 # v4.1.3
+        with:
+          pkgname: ${{ inputs.aur-package }}
+          pkgbuild: ./PKGBUILD
+          commit_username: "github-actions[bot]"
+          commit_email: "github-actions[bot]@users.noreply.github.com"
+          commit_message: "Update ${{ inputs.aur-package }} to ${{ needs.version-check.outputs.version }}"
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+
+  # ---------------------------------------------------------------------
+  # 12. Cloudsmith (conditional, skipped in dry-run, non-blocking)
+  # ---------------------------------------------------------------------
+  cloudsmith:
+    needs: release
+    if: inputs.enable-linux-packages && inputs.cloudsmith-repo != '' && !inputs.dry-run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Non-blocking for the same reason as winget/AUR: a Cloudsmith hiccup
+    # shouldn't fail a release that already succeeded on GitHub.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Verify CLOUDSMITH_API_KEY is set
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDSMITH_API_KEY}" ]; then
+            echo "ERROR: CLOUDSMITH_API_KEY secret is not set" >&2
+            exit 1
+          fi
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
+      - name: Download deb/rpm packages from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_EVENT_RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${GITHUB_EVENT_RELEASE_TAG_NAME}" \
+            --pattern "*.deb" --pattern "*.rpm" --dir dist
+
+      - name: Push packages to Cloudsmith
+        # any-distro/any-version is Cloudsmith's own documented wildcard
+        # distribution path for both deb and rpm pushes — see
+        # https://docs.cloudsmith.com/formats/debian-repository and
+        # https://docs.cloudsmith.com/formats/redhat-repository. It accepts
+        # any Debian/RedHat-family installer without pinning to one distro
+        # release, which is the right default for a generically-built
+        # cargo-deb/cargo-generate-rpm package.
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          CLOUDSMITH_REPO: ${{ inputs.cloudsmith-repo }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in dist/*.deb; do
+            echo "Pushing $f to ${CLOUDSMITH_REPO}/any-distro/any-version..."
+            uvx --from cloudsmith-cli==1.19.0 cloudsmith push deb "${CLOUDSMITH_REPO}/any-distro/any-version" "$f"
+          done
+          for f in dist/*.rpm; do
+            echo "Pushing $f to ${CLOUDSMITH_REPO}/any-distro/any-version..."
+            uvx --from cloudsmith-cli==1.19.0 cloudsmith push rpm "${CLOUDSMITH_REPO}/any-distro/any-version" "$f"
+          done

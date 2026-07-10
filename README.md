@@ -51,7 +51,10 @@ duplication is intentional; see the comment at the top of each file.
 | `homebrew-description` | string | `""` | Description for the Homebrew formula `desc` and the Scoop manifest. Empty falls back to the `version-package` crate's `description` in Cargo.toml, then to `"<bin-name> CLI"` — so most callers never set this. |
 | `homebrew-caveats` | string | `""` | Formula caveats text, rendered inside a `def caveats` / `<<~EOS` block. Empty omits the caveats block entirely. |
 | `scoop-bucket` | string | `"ractive/scoop-bucket"` | Scoop bucket repository to publish the manifest to. |
-| `dry-run` | boolean | `false` | Build, test, package, and upload as workflow artifacts only. Skips tag verification (derives version from `cargo metadata` instead), GitHub release upload, crates.io, Homebrew, Scoop, winget, and attestation. |
+| `aur-package` | string | `""` | AUR package name, e.g. `hyalo-bin`. Empty skips AUR. |
+| `aur-maintainer` | string | `"Jean-Pierre Bergamin <james@ractive.ch>"` | Rendered as the `# Maintainer:` PKGBUILD comment. |
+| `cloudsmith-repo` | string | `""` | Cloudsmith org/repo slug, e.g. `ractive/cli`. Empty skips Cloudsmith. |
+| `dry-run` | boolean | `false` | Build, test, package, and upload as workflow artifacts only. Skips tag verification (derives version from `cargo metadata` instead), GitHub release upload, crates.io, Homebrew, Scoop, winget, AUR, and Cloudsmith. |
 
 Default `targets`:
 
@@ -92,6 +95,8 @@ the secret for a feature that's actually enabled:
 | `HOMEBREW_TAP_TOKEN` | always (Homebrew job always runs unless `dry-run`) | `release.yml` (`homebrew` job) |
 | `SCOOP_BUCKET_TOKEN` | always (Scoop job always runs unless `dry-run`) | `release.yml` (`scoop` job) |
 | `WINGET_TOKEN` | `winget-identifier` is non-empty | `release.yml` (`winget` job) |
+| `AUR_SSH_PRIVATE_KEY` | `aur-package` is non-empty | `release.yml` (`aur` job) |
+| `CLOUDSMITH_API_KEY` | `cloudsmith-repo` is non-empty | `release.yml` (`cloudsmith` job) |
 
 `GH_TOKEN`/`github.token` (the automatic `GITHUB_TOKEN`) is used for release
 asset upload/download and needs no configuration beyond the permissions
@@ -148,6 +153,10 @@ jobs:
       version-package: hyalo-cli
       publish-crates: hyalo-core,hyalo-mdlint,hyalo-cli
       winget-identifier: ractive.hyalo
+      # AUR and Cloudsmith both require account/repo setup first — see
+      # "Linux distro publishing" above. Uncomment once that's done:
+      # aur-package: hyalo-bin
+      # cloudsmith-repo: ractive/cli
 ```
 
 The Homebrew/Scoop description is derived automatically from `hyalo-cli`'s
@@ -209,6 +218,10 @@ jobs:
           cargo install bore-cli
           brew install bore-cli
         This is optional — see `hoppy container logs --help` for tunnel alternatives.
+      # AUR and Cloudsmith both require account/repo setup first — see
+      # "Linux distro publishing" above. Uncomment once that's done:
+      # aur-package: hoppy-bin
+      # cloudsmith-repo: ractive/cli
       # run_tests is false everywhere: hoppy's release pipeline has never run
       # tests (PR CI covers them, on ubuntu). Its Windows CLI tests overflow
       # the default 1 MB MSVC stack, so enabling them here would break.
@@ -252,6 +265,10 @@ jobs:
       winget-identifier: ractive.ff-rdp
       # ff-rdp ships SBOMs for both published crates, not just the CLI:
       sbom-packages: ff-rdp-cli,ff-rdp-core
+      # AUR requires account setup first — see "Linux distro publishing"
+      # above. Uncomment once that's done. (No Cloudsmith example here:
+      # ff-rdp doesn't set enable-linux-packages, so there's nothing to push.)
+      # aur-package: ff-rdp-bin
       targets: >-
         [
           {"target": "x86_64-unknown-linux-gnu",   "os": "ubuntu-latest",  "cross": false, "run_tests": true},
@@ -349,6 +366,82 @@ every consuming repo's next release.
   fork of `microsoft/winget-pkgs` under the `ractive` org. `winget-releaser`
   can only update packages that already exist upstream; the first submission
   of a new package must be done manually via PR to `microsoft/winget-pkgs`.
+
+## Linux distro publishing
+
+Two optional, non-blocking jobs (`continue-on-error: true`, same stance as
+`winget`) publish Linux packages beyond the GitHub release assets. Both are
+skipped in `dry-run` and skipped entirely unless their input is set — no
+caller is affected until it opts in.
+
+### AUR (`aur-package`)
+
+Generates a `PKGBUILD` and pushes it to the [Arch User
+Repository](https://aur.archlinux.org) via
+[`KSXGitHub/github-actions-deploy-aur`](https://github.com/KSXGitHub/github-actions-deploy-aur).
+One `PKGBUILD` covers all three app repos: `pkgdesc` uses the same
+`homebrew-description` → Cargo.toml `description` → `"<bin-name> CLI"`
+precedence as Homebrew/Scoop, `arch=()`/`source_<arch>=()` entries are
+emitted only for architectures with an artifact in `SHA256SUMS` (same
+musl-preferred-over-gnu selection as the Homebrew job), and `package()`
+conditionally installs `LICENSE`, `README.md`, shell completions
+(`completions/<bin>.bash`, `completions/_<bin>`, `completions/<bin>.fish`),
+and man pages (`man/*.1`) only when those paths exist in the archive —
+so hoppy's completions/man pages install correctly while hyalo/ff-rdp (which
+don't ship them) get a `PKGBUILD` that just skips those `install` calls.
+
+**One-time setup:**
+1. Create an account at [aur.archlinux.org](https://aur.archlinux.org).
+2. Generate an SSH key pair dedicated to this purpose; add the **public**
+   key to the account at <https://aur.archlinux.org/account/> (SSH Public
+   Key field).
+3. Store the **private** key as the repository secret `AUR_SSH_PRIVATE_KEY`.
+4. The first workflow push auto-creates the AUR package — no separate manual
+   submission step, unlike winget.
+
+**User-facing install** (once published):
+```bash
+yay -S hyalo-bin
+# or any other AUR helper, e.g. paru -S hyalo-bin
+```
+
+### Cloudsmith (`cloudsmith-repo`)
+
+Pushes the `.deb`/`.rpm` artifacts already built by `enable-linux-packages`
+to a [Cloudsmith](https://cloudsmith.com) repository, using
+[`cloudsmith-cli`](https://github.com/cloudsmith-io/cloudsmith-cli)
+(installed pinned via `uvx --from cloudsmith-cli==<version>`, same pattern as
+`zizmor` in `ci.yml`). Requires `enable-linux-packages: true` — there's
+nothing to push otherwise. Both formats push to Cloudsmith's documented
+`any-distro/any-version` wildcard distribution
+([deb docs](https://docs.cloudsmith.com/formats/debian-repository),
+[rpm docs](https://docs.cloudsmith.com/formats/redhat-repository)), which
+accepts the package for any Debian/RedHat-family distribution rather than
+pinning to one distro codename — the right default for a package built
+generically by `cargo-deb`/`cargo-generate-rpm` rather than targeting a
+specific distro's toolchain.
+
+**One-time setup:**
+1. Create a Cloudsmith organization and a repository within it.
+2. Apply for Cloudsmith's [open-source
+   plan](https://cloudsmith.com/pricing/) (free hosting for qualifying OSS
+   projects).
+3. Create an API key under the organization/repository settings.
+4. Store it as the repository secret `CLOUDSMITH_API_KEY`.
+
+**User-facing install** (once published; replace `<org>`/`<repo>` — this is
+Cloudsmith's own documented "Set Me Up" one-liner form, see
+[deb](https://docs.cloudsmith.com/formats/debian-repository)/[rpm](https://docs.cloudsmith.com/formats/redhat-repository)
+docs for the always-current version):
+```bash
+# Debian/Ubuntu
+curl -sLf 'https://dl.cloudsmith.io/public/<org>/<repo>/cfg/setup/bash.deb.sh' | sudo bash
+sudo apt install <bin-name>
+
+# Fedora/RHEL/openSUSE (yum/dnf/zypper)
+curl -sLf 'https://dl.cloudsmith.io/public/<org>/<repo>/cfg/setup/bash.rpm.sh' | sudo bash
+sudo dnf install <bin-name>   # or yum / zypper
+```
 
 ## Testing
 
