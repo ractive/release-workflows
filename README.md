@@ -41,7 +41,7 @@ duplication is intentional; see the comment at the top of each file.
 | `enable-attestation` | boolean | `true` | Attest build provenance via `actions/attest-build-provenance` on native targets. Cross containers lack OIDC, so cross targets are always skipped. Skipped entirely in dry-run. |
 | `enable-linux-packages` | boolean | `false` | Build `.deb` and `.rpm` packages from a native `x86_64-unknown-linux-gnu` build via `cargo-deb` + `cargo-generate-rpm`. |
 | `linux-package-crate` | string | `""` | Crate to package for deb/rpm. Empty falls back to `version-package`. |
-| `pre-package-command` | string | `""` | Bash command run after the native build, before archiving/packaging (e.g. generate shell completions or man pages). Runs on native builds only. `TARGET`, `BIN_NAME`, `VERSION` are exported into its environment. |
+| `pre-package-command` | string | `""` | Bash command run after the build, before archiving/packaging (e.g. generate shell completions or man pages). Runs on every matrix target and in the linux-packages job. `TARGET`, `CROSS`, `BIN_NAME`, `VERSION` are exported; when `CROSS=true` the target binary is not host-runnable, so produce files with a host build (e.g. `cargo run`) instead. |
 | `extra-archive-paths` | string | `""` | Newline- or space-separated extra paths (relative to workspace root) to include in archives alongside the binary, `LICENSE`, and `README.md`. |
 | `winget-identifier` | string | `""` | e.g. `ractive.hyalo`. Empty skips winget. |
 | `winget-pkgs-fork` | string | `"ractive/winget-pkgs"` | Owner/repo of the winget-pkgs fork to sync and submit from. |
@@ -140,7 +140,7 @@ permissions:
   attestations: write
 jobs:
   release:
-    uses: ractive/release-workflows/.github/workflows/release.yml@v1.0.0
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.1.0
     secrets: inherit
     with:
       bin-name: hyalo
@@ -170,7 +170,7 @@ permissions:
   attestations: write
 jobs:
   release:
-    uses: ractive/release-workflows/.github/workflows/release.yml@v1.0.0
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.1.0
     secrets: inherit
     with:
       bin-name: hoppy
@@ -179,7 +179,8 @@ jobs:
       enable-linux-packages: true
       pre-package-command: |
         mkdir -p completions man
-        if [ "$TARGET" = "aarch64-pc-windows-msvc" ] || [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then
+        if [ "$CROSS" = "true" ] || [ "$TARGET" = "aarch64-pc-windows-msvc" ]; then
+          # Target binary is not host-runnable: generate with a host build.
           cargo run --release -- completions bash  > completions/hoppy.bash
           cargo run --release -- completions zsh   > completions/_hoppy
           cargo run --release -- completions fish  > completions/hoppy.fish
@@ -191,6 +192,11 @@ jobs:
           "$BIN" completions fish > completions/hoppy.fish
         fi
         cargo xtask --output-dir man
+        # cargo-deb / cargo-generate-rpm resolve [package.metadata.*] asset
+        # paths relative to the crate directory:
+        mkdir -p crates/hoppy-cli/completions crates/hoppy-cli/man
+        cp completions/* crates/hoppy-cli/completions/
+        cp man/* crates/hoppy-cli/man/
       extra-archive-paths: completions man
       homebrew-caveats: |
         hoppy container logs requires bore for automatic tunnel setup:
@@ -228,7 +234,7 @@ permissions:
   attestations: write
 jobs:
   release:
-    uses: ractive/release-workflows/.github/workflows/release.yml@v1.0.0
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.1.0
     secrets: inherit
     with:
       bin-name: ff-rdp
@@ -257,7 +263,7 @@ permissions:
   contents: read
 jobs:
   dry-run:
-    uses: ractive/release-workflows/.github/workflows/release.yml@v1.0.0
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.1.0
     secrets: inherit
     with:
       bin-name: hyalo
@@ -289,7 +295,7 @@ permissions:
   contents: read
 jobs:
   publish:
-    uses: ractive/release-workflows/.github/workflows/publish-crates.yml@v1.0.0
+    uses: ractive/release-workflows/.github/workflows/publish-crates.yml@v0.1.0
     secrets: inherit
     with:
       publish-crates: hyalo-core,hyalo-mdlint,hyalo-cli
@@ -303,7 +309,7 @@ release event triggers the app repos' own `release.yml`, which is separate
 from this repo's release process). Callers pin to a specific tag:
 
 ```yaml
-uses: ractive/release-workflows/.github/workflows/release.yml@v1.0.0
+uses: ractive/release-workflows/.github/workflows/release.yml@v0.1.0
 ```
 
 Do not pin to `@main` — an unreviewed change here would immediately affect

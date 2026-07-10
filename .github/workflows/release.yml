@@ -67,7 +67,7 @@ on:
         type: string
         default: ""
       pre-package-command:
-        description: "Bash command run after the native build, before archiving/packaging (e.g. generate completions/man pages). Runs on native builds only. TARGET, BIN_NAME, VERSION are exported."
+        description: "Bash command run after the build, before archiving/packaging (e.g. generate completions/man pages). Runs on every matrix target and in the linux-packages job. TARGET, CROSS, BIN_NAME, VERSION are exported; when CROSS=true the target binary is not host-runnable, so produce files with a host build (e.g. cargo run) instead."
         required: false
         type: string
         default: ""
@@ -280,11 +280,16 @@ jobs:
         run: cargo run --release --target "$TARGET" -p "$VERSION_PACKAGE" -- --help
 
       - name: Run pre-package command
-        if: "!matrix.cross && inputs.pre-package-command != ''"
+        # Runs for cross targets too: their archives need the same extra
+        # files (completions, man pages), which the command must then produce
+        # with a host binary (e.g. `cargo run`) since the cross-compiled one
+        # is not runnable here. CROSS tells the command which case it is in.
+        if: inputs.pre-package-command != ''
         shell: bash
         working-directory: ${{ inputs.workspace-dir }}
         env:
           TARGET: ${{ matrix.target }}
+          CROSS: ${{ matrix.cross }}
           BIN_NAME: ${{ inputs.bin-name }}
           VERSION: ${{ needs.version-check.outputs.version }}
           INPUTS_PRE_PACKAGE_COMMAND: ${{ inputs.pre-package-command }}
@@ -422,6 +427,7 @@ jobs:
         working-directory: ${{ inputs.workspace-dir }}
         env:
           TARGET: x86_64-unknown-linux-gnu
+          CROSS: "false"
           BIN_NAME: ${{ inputs.bin-name }}
           VERSION: ${{ needs.version-check.outputs.version }}
           INPUTS_PRE_PACKAGE_COMMAND: ${{ inputs.pre-package-command }}
