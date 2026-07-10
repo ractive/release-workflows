@@ -191,12 +191,18 @@ jobs:
           "$BIN_PATH" completions zsh  > completions/_hoppy
           "$BIN_PATH" completions fish > completions/hoppy.fish
         fi
-        cargo xtask --output-dir man
+        case "$TARGET" in
+          # Man pages are not used on Windows, and hoppy's debug xtask
+          # overflows the 1 MB MSVC stack; the empty man/ dir keeps
+          # extra-archive-paths satisfied.
+          *windows*) ;;
+          *) cargo xtask --output-dir man ;;
+        esac
         # cargo-deb / cargo-generate-rpm resolve [package.metadata.*] asset
         # paths relative to the crate directory:
         mkdir -p crates/hoppy-cli/completions crates/hoppy-cli/man
         cp completions/* crates/hoppy-cli/completions/
-        cp man/* crates/hoppy-cli/man/
+        if [ "$(ls -A man)" ]; then cp man/* crates/hoppy-cli/man/; fi
       extra-archive-paths: completions man
       homebrew-caveats: |
         hoppy container logs requires bore for automatic tunnel setup:
