@@ -1,0 +1,99 @@
+# Reusable, standalone crates.io publish workflow — the recovery path for
+# when a release's crates-io job fails after the release itself (artifacts,
+# package managers) has already succeeded. Callers keep a thin
+# workflow_dispatch wrapper that calls this with `ref` pointed at a fixed-up
+# commit, so a fix on main can reach a partially-published release without
+# re-running the original release workflow (which would pin to the release
+# commit's crate set). Publishing is idempotent: every step treats "already
+# uploaded/exists" as success, so a partial earlier publish is safe to resume.
+name: Publish crates (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      publish-crates:
+        description: "Comma-separated, dependency-ordered list of crates to publish to crates.io"
+        required: true
+        type: string
+      ref:
+        description: "Git ref (tag/branch/sha) to check out and publish from"
+        required: false
+        type: string
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions: {}
+
+jobs:
+  crates-io:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Verify CARGO_TOKEN is set
+        env:
+          CARGO_TOKEN: ${{ secrets.CARGO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_TOKEN}" ]; then
+            echo "ERROR: CARGO_TOKEN secret is not set. Add a crates.io API token as a repository secret." >&2
+            exit 1
+          fi
+
+      - name: Publish crates to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+          PUBLISH_CRATES: ${{ inputs.publish-crates }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra crates <<< "${PUBLISH_CRATES}"
+          for crate in "${crates[@]}"; do
+            crate="$(echo "$crate" | xargs)"
+            [ -z "$crate" ] && continue
+            echo "::group::Publishing $crate"
+            max_attempts=10
+            delay=15
+            published=false
+            for attempt in $(seq 1 "$max_attempts"); do
+              echo "Publishing $crate (attempt $attempt/$max_attempts)..."
+              if output=$(cargo publish --package "$crate" --locked 2>&1); then
+                echo "$output"
+                echo "$crate published successfully."
+                published=true
+                break
+              fi
+              echo "$output"
+              if echo "$output" | grep -qE 'already (uploaded|exists)'; then
+                echo "$crate already published, skipping."
+                published=true
+                break
+              fi
+              if echo "$output" | grep -qiE 'failed to select a version|no matching package named|depends on'; then
+                if [ "$attempt" -eq "$max_attempts" ]; then
+                  echo "ERROR: giving up on $crate after $max_attempts attempts" >&2
+                  exit 1
+                fi
+                echo "Index not yet updated, waiting ${delay}s..."
+                sleep "$delay"
+                delay=$((delay * 2))
+              else
+                echo "ERROR: cargo publish failed for $crate with a non-index error" >&2
+                exit 1
+              fi
+            done
+            echo "::endgroup::"
+            if [ "$published" != true ]; then
+              echo "ERROR: $crate was not published" >&2
+              exit 1
+            fi
+          done

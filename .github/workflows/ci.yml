@@ -1,0 +1,31 @@
+# Self-check: lint this repo's own workflow files with actionlint on every
+# push and pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Download actionlint
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/3795ba2f6cb243eeca54c9d22e5c531cb9dcfb4a/scripts/download-actionlint.bash) 1.7.12
+        # Pinned download script commit + pinned actionlint version for
+        # reproducibility. See https://github.com/rhysd/actionlint releases.
+
+      - name: Run actionlint
+        run: ./actionlint -color

@@ -1,0 +1,887 @@
+# Reusable release pipeline shared by ractive's Rust CLI repos (hyalo, hoppy,
+# ff-rdp). Callers invoke this via `workflow_call` from their own
+# `on: release: types: [published]` (or `workflow_dispatch` for dry runs)
+# workflow and pass `secrets: inherit` so this workflow can read the caller's
+# repository secrets directly.
+#
+# This workflow is fully self-contained: reusable workflows run their jobs
+# against the CALLING repository's checkout, so any composite action or
+# script path checked out from *this* repo would resolve against the wrong
+# tree. Everything needed — including the crates.io publish retry loop that
+# is intentionally duplicated from publish-crates.yml — lives inline here.
+name: Release (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      bin-name:
+        description: "Binary name, e.g. hyalo"
+        required: true
+        type: string
+      version-package:
+        description: "Cargo package whose version must match the release tag, e.g. hyalo-cli"
+        required: true
+        type: string
+      publish-crates:
+        description: "Comma-separated, dependency-ordered list of crates to publish to crates.io. Empty skips crates.io."
+        required: false
+        type: string
+        default: ""
+      targets:
+        description: "JSON array of {target, os, cross, run_tests} matrix entries"
+        required: false
+        type: string
+        default: >-
+          [
+            {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-latest", "cross": false, "run_tests": true},
+            {"target": "x86_64-unknown-linux-musl", "os": "ubuntu-latest", "cross": true, "run_tests": true},
+            {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-latest", "cross": true, "run_tests": true},
+            {"target": "aarch64-unknown-linux-musl", "os": "ubuntu-latest", "cross": true, "run_tests": true},
+            {"target": "aarch64-apple-darwin", "os": "macos-latest", "cross": false, "run_tests": true},
+            {"target": "x86_64-pc-windows-msvc", "os": "windows-latest", "cross": false, "run_tests": true},
+            {"target": "aarch64-pc-windows-msvc", "os": "windows-latest", "cross": false, "run_tests": false}
+          ]
+      enable-sbom:
+        description: "Generate a CycloneDX SBOM on native (non-cross) targets"
+        required: false
+        type: boolean
+        default: true
+      enable-attestation:
+        description: "Attest build provenance on native (non-cross) targets"
+        required: false
+        type: boolean
+        default: true
+      enable-linux-packages:
+        description: "Build .deb and .rpm packages from a native x86_64-unknown-linux-gnu build"
+        required: false
+        type: boolean
+        default: false
+      linux-package-crate:
+        description: "Crate to package for deb/rpm. Empty falls back to version-package."
+        required: false
+        type: string
+        default: ""
+      pre-package-command:
+        description: "Bash command run after the native build, before archiving/packaging (e.g. generate completions/man pages). Runs on native builds only. TARGET, BIN_NAME, VERSION are exported."
+        required: false
+        type: string
+        default: ""
+      extra-archive-paths:
+        description: "Newline- or space-separated extra paths (relative to workspace root) to include in archives alongside the binary, LICENSE and README"
+        required: false
+        type: string
+        default: ""
+      winget-identifier:
+        description: "e.g. ractive.hyalo. Empty skips winget."
+        required: false
+        type: string
+        default: ""
+      winget-pkgs-fork:
+        description: "Owner/repo of the winget-pkgs fork to sync and submit from"
+        required: false
+        type: string
+        default: "ractive/winget-pkgs"
+      homebrew-tap:
+        description: "Homebrew tap repository to publish the formula to"
+        required: false
+        type: string
+        default: "ractive/homebrew-tap"
+      homebrew-formula:
+        description: "Formula file name (without .rb). Empty falls back to bin-name."
+        required: false
+        type: string
+        default: ""
+      scoop-bucket:
+        description: "Scoop bucket repository to publish the manifest to"
+        required: false
+        type: string
+        default: "ractive/scoop-bucket"
+      dry-run:
+        description: "Build, test, package and upload as workflow artifacts only. Skips tag verification, GitHub release upload, crates.io, Homebrew, Scoop, winget and attestation."
+        required: false
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions: {}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. Version check
+  # ---------------------------------------------------------------------
+  version-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Resolve and verify version
+        id: version
+        shell: bash
+        env:
+          VERSION_PACKAGE: ${{ inputs.version-package }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r --arg pkg "$VERSION_PACKAGE" '.packages[] | select(.name == $pkg) | .version')
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "ERROR: package '$VERSION_PACKAGE' not found via cargo metadata" >&2
+            exit 1
+          fi
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: skipping tag comparison, using Cargo.toml version $CARGO_VERSION"
+            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TAG_VERSION="${TAG#v}"
+          echo "Git tag version:    $TAG_VERSION"
+          echo "Cargo.toml version: $CARGO_VERSION"
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "ERROR: tag '$TAG' does not match $VERSION_PACKAGE version '$CARGO_VERSION'" >&2
+            exit 1
+          fi
+          echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------
+  # 2. Security
+  # ---------------------------------------------------------------------
+  security:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install security tools
+        uses: taiki-e/install-action@a1df9120380005ebdc788c62449b841b205541dd # v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      - name: Audit dependencies for known vulnerabilities
+        run: cargo audit
+
+      - name: Check licenses, advisories, bans, and sources
+        run: cargo deny check
+
+  # ---------------------------------------------------------------------
+  # 3. Build matrix
+  # ---------------------------------------------------------------------
+  build:
+    needs: [version-check, security]
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.targets) }}
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # Without a per-target key every matrix job shares one cache (same
+          # github.job + same lockfile hash), and the cross-container builds
+          # restore host-glibc build-script binaries from the native x86_64
+          # job — which then fail inside the older-glibc cross image with
+          # "version `GLIBC_2.28' not found".
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@a1df9120380005ebdc788c62449b841b205541dd # v2
+        with:
+          tool: cross
+
+      - name: Set hermetic build provenance
+        shell: bash
+        # build.rs (if present) should prefer GIT_COMMIT/GIT_COMMIT_DATE over
+        # shelling out to git, and declare them rerun-if-env-changed — that
+        # forces the build script to rerun even when a restored rust-cache
+        # carries a stale build-script output. Cross.toml must passthrough
+        # both into cross containers for cross-compiled targets.
+        run: |
+          echo "GIT_COMMIT=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+          echo "GIT_COMMIT_DATE=$(git show -s --date=short --format=%cd HEAD)" >> "$GITHUB_ENV"
+
+      - name: Build release
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }}
+
+      - name: Run tests
+        if: matrix.run_tests
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} test --workspace --target ${{ matrix.target }}
+
+      - name: Verify CLI runs
+        if: '!matrix.cross && matrix.run_tests'
+        run: cargo run --release --target ${{ matrix.target }} -p ${{ inputs.version-package }} -- --help
+
+      - name: Run pre-package command
+        if: "!matrix.cross && inputs.pre-package-command != ''"
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BIN_NAME: ${{ inputs.bin-name }}
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: ${{ inputs.pre-package-command }}
+
+      - name: Determine archive name
+        shell: bash
+        env:
+          BIN_NAME: ${{ inputs.bin-name }}
+          VERSION: ${{ needs.version-check.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          echo "ARCHIVE_BASE=${BIN_NAME}-v${VERSION}-${TARGET}" >> "$GITHUB_ENV"
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          BIN_NAME: ${{ inputs.bin-name }}
+          EXTRA_ARCHIVE_PATHS: ${{ inputs.extra-archive-paths }}
+        run: |
+          set -euo pipefail
+          mkdir -p archive
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" archive/
+          [ -f LICENSE ] && cp LICENSE archive/
+          [ -f README.md ] && cp README.md archive/
+          if [ -n "${EXTRA_ARCHIVE_PATHS}" ]; then
+            for p in ${EXTRA_ARCHIVE_PATHS}; do
+              mkdir -p "archive/$(dirname "$p")"
+              cp -r "$p" "archive/$p"
+            done
+          fi
+          tar czf "${ARCHIVE_BASE}.tar.gz" -C archive .
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          BIN_NAME: ${{ inputs.bin-name }}
+          EXTRA_ARCHIVE_PATHS: ${{ inputs.extra-archive-paths }}
+        run: |
+          set -euo pipefail
+          mkdir -p archive
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}.exe" archive/
+          [ -f LICENSE ] && cp LICENSE archive/
+          [ -f README.md ] && cp README.md archive/
+          if [ -n "${EXTRA_ARCHIVE_PATHS}" ]; then
+            for p in ${EXTRA_ARCHIVE_PATHS}; do
+              mkdir -p "archive/$(dirname "$p")"
+              cp -r "$p" "archive/$p"
+            done
+          fi
+          cd archive
+          7z a "../${ARCHIVE_BASE}.zip" .
+
+      - name: Install cargo-cyclonedx
+        if: inputs.enable-sbom && !matrix.cross
+        uses: taiki-e/install-action@a1df9120380005ebdc788c62449b841b205541dd # v2
+        with:
+          tool: cargo-cyclonedx
+
+      - name: Generate CycloneDX SBOM
+        if: inputs.enable-sbom && !matrix.cross
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo cyclonedx --format json --target ${{ matrix.target }}
+          # cargo-cyclonedx writes one SBOM per package next to its
+          # Cargo.toml; collect the one for the released binary crate so it
+          # travels alongside the archive.
+          mkdir -p sbom
+          find . -path './target' -prune -o -name '*.cdx.json' -print | while read -r f; do
+            cp "$f" "sbom/$(basename "$(dirname "$f")")-${{ matrix.target }}.cdx.json"
+          done
+          ls -la sbom
+          bin_sbom="sbom/${{ inputs.version-package }}-${{ matrix.target }}.cdx.json"
+          if [ -f "$bin_sbom" ]; then
+            cp "$bin_sbom" "${ARCHIVE_BASE}.cdx.json"
+          else
+            echo "WARNING: no SBOM found at $bin_sbom, skipping SBOM attach for this target"
+          fi
+
+      - name: Attest build provenance
+        if: inputs.enable-attestation && !matrix.cross && !inputs.dry-run
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            ${{ env.ARCHIVE_BASE }}.tar.gz
+            ${{ env.ARCHIVE_BASE }}.zip
+            ${{ env.ARCHIVE_BASE }}.cdx.json
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.bin-name }}-${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE_BASE }}.tar.gz
+            ${{ env.ARCHIVE_BASE }}.zip
+            ${{ env.ARCHIVE_BASE }}.cdx.json
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------
+  # 4. Linux packages (deb/rpm) — conditional
+  # ---------------------------------------------------------------------
+  linux-packages:
+    needs: [version-check, security]
+    if: inputs.enable-linux-packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: linux-packages
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Run pre-package command
+        if: inputs.pre-package-command != ''
+        shell: bash
+        env:
+          TARGET: x86_64-unknown-linux-gnu
+          BIN_NAME: ${{ inputs.bin-name }}
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: ${{ inputs.pre-package-command }}
+
+      - name: Resolve package crate directory
+        id: pkgdir
+        shell: bash
+        env:
+          LINUX_PACKAGE_CRATE: ${{ inputs.linux-package-crate }}
+          VERSION_PACKAGE: ${{ inputs.version-package }}
+        run: |
+          set -euo pipefail
+          crate="${LINUX_PACKAGE_CRATE:-$VERSION_PACKAGE}"
+          dir=$(cargo metadata --no-deps --format-version 1 | jq -r --arg pkg "$crate" '.packages[] | select(.name == $pkg) | .manifest_path' | xargs dirname)
+          if [ -z "$dir" ] || [ "$dir" = "." ]; then
+            echo "ERROR: could not resolve manifest directory for crate '$crate'" >&2
+            exit 1
+          fi
+          echo "crate=$crate" >> "$GITHUB_OUTPUT"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Install packaging tools
+        uses: taiki-e/install-action@a1df9120380005ebdc788c62449b841b205541dd # v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      - name: Build deb package
+        # cargo-deb picks up the binary from target/release/ and assets from
+        # [package.metadata.deb] in the package's own Cargo.toml, resolved
+        # relative to that package directory.
+        run: cargo deb -p "${{ steps.pkgdir.outputs.crate }}" --no-build --no-strip
+
+      - name: Build rpm package
+        # cargo-generate-rpm's `-p` is a path (NOT a workspace package name
+        # like cargo's own -p flag). It reads
+        # [package.metadata.generate-rpm] from that Cargo.toml.
+        run: cargo generate-rpm -p "${{ steps.pkgdir.outputs.dir }}"
+
+      - name: Rename packages with version
+        shell: bash
+        env:
+          BIN_NAME: ${{ inputs.bin-name }}
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for f in target/debian/*.deb; do
+            cp "$f" "dist/${BIN_NAME}-v${VERSION}-x86_64-linux.deb"
+          done
+          for f in target/generate-rpm/*.rpm; do
+            cp "$f" "dist/${BIN_NAME}-v${VERSION}-x86_64-linux.rpm"
+          done
+
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.bin-name }}-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+      - name: Upload rpm artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.bin-name }}-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # 5. GitHub release upload (skipped in dry-run)
+  # ---------------------------------------------------------------------
+  release:
+    needs: [build, linux-packages]
+    if: |
+      always() && !inputs.dry-run &&
+      needs.build.result == 'success' &&
+      (needs.linux-packages.result == 'success' || needs.linux-packages.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd artifacts
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" artifacts/*
+
+  # ---------------------------------------------------------------------
+  # 6. Dry-run summary (only in dry-run)
+  # ---------------------------------------------------------------------
+  dry-run-summary:
+    needs: [build, linux-packages]
+    if: |
+      always() && inputs.dry-run &&
+      needs.build.result == 'success' &&
+      (needs.linux-packages.result == 'success' || needs.linux-packages.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd artifacts
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload dry-run bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dry-run-bundle
+          path: artifacts/*
+
+      - name: Print summary
+        shell: bash
+        run: |
+          {
+            echo "## Dry-run release bundle"
+            echo ""
+            echo "| File | Size |"
+            echo "| --- | --- |"
+            cd artifacts
+            for f in *; do
+              [ "$f" = "SHA256SUMS" ] && continue
+              size=$(du -h "$f" | cut -f1)
+              echo "| $f | $size |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # 7. crates.io (conditional, skipped in dry-run)
+  # ---------------------------------------------------------------------
+  crates-io:
+    needs: release
+    if: inputs.publish-crates != '' && !inputs.dry-run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Verify CARGO_TOKEN is set
+        env:
+          CARGO_TOKEN: ${{ secrets.CARGO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_TOKEN}" ]; then
+            echo "ERROR: CARGO_TOKEN secret is not set. Add a crates.io API token as a repository secret." >&2
+            exit 1
+          fi
+
+      - name: Publish crates to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+          PUBLISH_CRATES: ${{ inputs.publish-crates }}
+        shell: bash
+        # Duplicated from publish-crates.yml by design — see the file header
+        # in this workflow for why reusable workflows can't share scripts.
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra crates <<< "${PUBLISH_CRATES}"
+          for crate in "${crates[@]}"; do
+            crate="$(echo "$crate" | xargs)"
+            [ -z "$crate" ] && continue
+            echo "::group::Publishing $crate"
+            max_attempts=10
+            delay=15
+            published=false
+            for attempt in $(seq 1 "$max_attempts"); do
+              echo "Publishing $crate (attempt $attempt/$max_attempts)..."
+              if output=$(cargo publish --package "$crate" --locked 2>&1); then
+                echo "$output"
+                echo "$crate published successfully."
+                published=true
+                break
+              fi
+              echo "$output"
+              if echo "$output" | grep -qE 'already (uploaded|exists)'; then
+                echo "$crate already published, skipping."
+                published=true
+                break
+              fi
+              if echo "$output" | grep -qiE 'failed to select a version|no matching package named|depends on'; then
+                if [ "$attempt" -eq "$max_attempts" ]; then
+                  echo "ERROR: giving up on $crate after $max_attempts attempts" >&2
+                  exit 1
+                fi
+                echo "Index not yet updated, waiting ${delay}s..."
+                sleep "$delay"
+                delay=$((delay * 2))
+              else
+                echo "ERROR: cargo publish failed for $crate with a non-index error" >&2
+                exit 1
+              fi
+            done
+            echo "::endgroup::"
+            if [ "$published" != true ]; then
+              echo "ERROR: $crate was not published" >&2
+              exit 1
+            fi
+          done
+
+  # ---------------------------------------------------------------------
+  # 8. Homebrew (skipped in dry-run)
+  # ---------------------------------------------------------------------
+  homebrew:
+    needs: [release, version-check]
+    if: '!inputs.dry-run'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Download SHA256SUMS from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ github.event.release.tag_name }}" \
+            --pattern "SHA256SUMS" --dir .
+
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          BIN_NAME: ${{ inputs.bin-name }}
+          FORMULA_NAME: ${{ inputs.homebrew-formula }}
+          HOMEBREW_TAP: ${{ inputs.homebrew-tap }}
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
+            echo "ERROR: HOMEBREW_TAP_TOKEN secret is not set" >&2
+            exit 1
+          fi
+
+          FORMULA_NAME="${FORMULA_NAME:-$BIN_NAME}"
+          REPO="${GITHUB_REPOSITORY}"
+          RELEASE_URL="https://github.com/${REPO}/releases/download"
+
+          get_sha() {
+            awk -v file="$1" '$2 == file {print $1}' SHA256SUMS
+          }
+
+          # Prefer musl artifacts for Linux where available (statically
+          # linked, no glibc version coupling); fall back to gnu.
+          find_linux_artifact() {
+            local arch="$1"
+            local musl_name="${BIN_NAME}-v${VERSION}-${arch}-unknown-linux-musl.tar.gz"
+            local gnu_name="${BIN_NAME}-v${VERSION}-${arch}-unknown-linux-gnu.tar.gz"
+            if grep -q " $musl_name\$" SHA256SUMS; then
+              echo "$musl_name"
+            elif grep -q " $gnu_name\$" SHA256SUMS; then
+              echo "$gnu_name"
+            else
+              echo ""
+            fi
+          }
+
+          MACOS_ARM64_FILE="${BIN_NAME}-v${VERSION}-aarch64-apple-darwin.tar.gz"
+          LINUX_ARM64_FILE=$(find_linux_artifact aarch64)
+          LINUX_X86_FILE=$(find_linux_artifact x86_64)
+
+          SHA_MACOS_ARM64=""
+          SHA_LINUX_ARM64=""
+          SHA_LINUX_X86=""
+          if grep -q " ${MACOS_ARM64_FILE}\$" SHA256SUMS; then
+            SHA_MACOS_ARM64=$(get_sha "$MACOS_ARM64_FILE")
+          fi
+          [ -n "$LINUX_ARM64_FILE" ] && SHA_LINUX_ARM64=$(get_sha "$LINUX_ARM64_FILE")
+          [ -n "$LINUX_X86_FILE" ] && SHA_LINUX_X86=$(get_sha "$LINUX_X86_FILE")
+
+          if [ -z "$SHA_MACOS_ARM64" ] && [ -z "$SHA_LINUX_ARM64" ] && [ -z "$SHA_LINUX_X86" ]; then
+            echo "ERROR: no known platform artifacts found in SHA256SUMS for Homebrew formula" >&2
+            exit 1
+          fi
+
+          {
+            echo "# typed: false"
+            echo "# frozen_string_literal: true"
+            echo "#"
+            echo "# Homebrew formula for ${BIN_NAME}."
+            echo "# Auto-updated by the release workflow in ${REPO}."
+            echo "class $(echo "$FORMULA_NAME" | sed -E 's/(^|-)([a-z])/\U\2/g') < Formula"
+            echo "  desc \"${BIN_NAME} CLI\""
+            echo "  homepage \"https://github.com/${REPO}\""
+            echo "  version \"${VERSION}\""
+            echo "  license \"MIT\""
+            echo ""
+            if [ -n "$SHA_MACOS_ARM64" ]; then
+              echo "  on_macos do"
+              echo "    on_arm do"
+              echo "      url \"${RELEASE_URL}/v#{version}/${MACOS_ARM64_FILE}\""
+              echo "      sha256 \"${SHA_MACOS_ARM64}\""
+              echo "    end"
+              echo "  end"
+              echo ""
+            fi
+            if [ -n "$SHA_LINUX_ARM64" ] || [ -n "$SHA_LINUX_X86" ]; then
+              echo "  on_linux do"
+              if [ -n "$SHA_LINUX_ARM64" ]; then
+                echo "    on_arm do"
+                echo "      url \"${RELEASE_URL}/v#{version}/${LINUX_ARM64_FILE}\""
+                echo "      sha256 \"${SHA_LINUX_ARM64}\""
+                echo "    end"
+                echo ""
+              fi
+              if [ -n "$SHA_LINUX_X86" ]; then
+                echo "    on_intel do"
+                echo "      url \"${RELEASE_URL}/v#{version}/${LINUX_X86_FILE}\""
+                echo "      sha256 \"${SHA_LINUX_X86}\""
+                echo "    end"
+              fi
+              echo "  end"
+              echo ""
+            fi
+            echo "  def install"
+            echo "    bin.install \"${BIN_NAME}\""
+            echo "  end"
+            echo ""
+            echo "  test do"
+            echo "    assert_match version.to_s, shell_output(\"#{bin}/${BIN_NAME} --version\")"
+            echo "  end"
+            echo "end"
+          } > formula.rb
+
+          cat formula.rb
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP}.git" tap
+          cp formula.rb "tap/Formula/${FORMULA_NAME}.rb"
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "Formula/${FORMULA_NAME}.rb"
+          if git diff --cached --quiet; then
+            echo "Formula unchanged, skipping commit"
+          else
+            git commit -m "Update ${FORMULA_NAME} to ${VERSION}"
+            git push
+          fi
+
+  # ---------------------------------------------------------------------
+  # 9. Scoop (skipped in dry-run)
+  # ---------------------------------------------------------------------
+  scoop:
+    needs: [release, version-check]
+    if: '!inputs.dry-run'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Download SHA256SUMS from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ github.event.release.tag_name }}" \
+            --pattern "SHA256SUMS" --dir .
+
+      - name: Update Scoop manifest
+        shell: bash
+        env:
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          BIN_NAME: ${{ inputs.bin-name }}
+          SCOOP_BUCKET: ${{ inputs.scoop-bucket }}
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SCOOP_BUCKET_TOKEN}" ]; then
+            echo "ERROR: SCOOP_BUCKET_TOKEN secret is not set" >&2
+            exit 1
+          fi
+
+          REPO="${GITHUB_REPOSITORY}"
+
+          get_sha() {
+            awk -v file="$1" '$2 == file {print $1}' SHA256SUMS
+          }
+
+          WIN_X64_FILE="${BIN_NAME}-v${VERSION}-x86_64-pc-windows-msvc.zip"
+          WIN_ARM64_FILE="${BIN_NAME}-v${VERSION}-aarch64-pc-windows-msvc.zip"
+
+          SHA_WIN_X64=""
+          SHA_WIN_ARM64=""
+          grep -q " ${WIN_X64_FILE}\$" SHA256SUMS && SHA_WIN_X64=$(get_sha "$WIN_X64_FILE")
+          grep -q " ${WIN_ARM64_FILE}\$" SHA256SUMS && SHA_WIN_ARM64=$(get_sha "$WIN_ARM64_FILE")
+
+          if [ -z "$SHA_WIN_X64" ] && [ -z "$SHA_WIN_ARM64" ]; then
+            echo "ERROR: no Windows artifacts found in SHA256SUMS for Scoop manifest" >&2
+            exit 1
+          fi
+
+          RELEASE_URL="https://github.com/${REPO}/releases/download"
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg bin_name "$BIN_NAME" \
+            --arg repo "$REPO" \
+            --arg release_url "$RELEASE_URL" \
+            --arg win_x64_file "$WIN_X64_FILE" \
+            --arg win_arm64_file "$WIN_ARM64_FILE" \
+            --arg sha_x64 "$SHA_WIN_X64" \
+            --arg sha_arm64 "$SHA_WIN_ARM64" \
+            '
+            def arch_entry(file; sha):
+              if (sha | length) > 0 then
+                {
+                  url: "\($release_url)/v\($version)/\(file)",
+                  hash: sha
+                }
+              else empty end;
+            {
+              version: $version,
+              description: "\($bin_name) CLI",
+              homepage: "https://github.com/\($repo)",
+              license: "MIT",
+              architecture: (
+                {}
+                + (if ($sha_x64 | length) > 0 then {"64bit": arch_entry($win_x64_file; $sha_x64)} else {} end)
+                + (if ($sha_arm64 | length) > 0 then {"arm64": arch_entry($win_arm64_file; $sha_arm64)} else {} end)
+              ),
+              bin: "\($bin_name).exe",
+              checkver: "github",
+              autoupdate: {
+                architecture: (
+                  {}
+                  + (if ($sha_x64 | length) > 0 then {
+                      "64bit": {
+                        url: "\($release_url)/v$version/\($bin_name)-v$version-x86_64-pc-windows-msvc.zip",
+                        hash: {
+                          url: "\($release_url)/v$version/SHA256SUMS",
+                          regex: "([a-fA-F0-9]+)\\s+\($bin_name)-v$version-x86_64-pc-windows-msvc\\.zip"
+                        }
+                      }
+                    } else {} end)
+                  + (if ($sha_arm64 | length) > 0 then {
+                      arm64: {
+                        url: "\($release_url)/v$version/\($bin_name)-v$version-aarch64-pc-windows-msvc.zip",
+                        hash: {
+                          url: "\($release_url)/v$version/SHA256SUMS",
+                          regex: "([a-fA-F0-9]+)\\s+\($bin_name)-v$version-aarch64-pc-windows-msvc\\.zip"
+                        }
+                      }
+                    } else {} end)
+                )
+              }
+            }' > "${BIN_NAME}.json"
+
+          cat "${BIN_NAME}.json"
+
+          git clone "https://x-access-token:${SCOOP_BUCKET_TOKEN}@github.com/${SCOOP_BUCKET}.git" scoop-repo
+          cp "${BIN_NAME}.json" "scoop-repo/bucket/${BIN_NAME}.json"
+          cd scoop-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "bucket/${BIN_NAME}.json"
+          if git diff --cached --quiet; then
+            echo "Manifest unchanged, skipping commit"
+          else
+            git commit -m "Update ${BIN_NAME} to ${VERSION}"
+            git push
+          fi
+
+  # ---------------------------------------------------------------------
+  # 10. winget (conditional, skipped in dry-run, non-blocking)
+  # ---------------------------------------------------------------------
+  winget:
+    needs: release
+    if: inputs.winget-identifier != '' && !inputs.dry-run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # winget-releaser can only update existing packages — the first version
+    # must be submitted manually via PR to microsoft/winget-pkgs. Non-blocking
+    # so a winget hiccup never fails the release.
+    continue-on-error: true
+    steps:
+      - name: Verify WINGET_TOKEN is set
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${WINGET_TOKEN}" ]; then
+            echo "ERROR: WINGET_TOKEN secret is not set" >&2
+            exit 1
+          fi
+
+      - name: Sync winget-pkgs fork
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: gh repo sync "${{ inputs.winget-pkgs-fork }}"
+
+      - name: Submit to winget-pkgs
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          identifier: ${{ inputs.winget-identifier }}
+          installers-regex: '${{ inputs.bin-name }}-.*-pc-windows-msvc\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}
