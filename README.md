@@ -25,7 +25,8 @@ duplication is intentional; see the comment at the top of each file.
 | --- | --- | --- |
 | `.github/workflows/release.yml` | `workflow_call` | Full release pipeline: version check, security audit, cross-platform build, optional SBOM/attestation/deb/rpm, GitHub release upload, crates.io, Homebrew, Scoop, winget. |
 | `.github/workflows/publish-crates.yml` | `workflow_call` | Standalone crates.io publish loop — the recovery path for when `release.yml`'s `crates-io` job fails after the GitHub release itself has already succeeded. |
-| `.github/workflows/ci.yml` | `push` to `main`, `pull_request` | Lints this repo's own workflow files with `actionlint`. |
+| `.github/workflows/ci.yml` | `push` to `main`, `pull_request` | Lints this repo's own workflow files with `actionlint` and `zizmor`. |
+| `.github/workflows/selftest.yml` | `push` to `main`, `pull_request` | Calls `release.yml` (from this same repo, at the triggering commit) against the `testdata/fixture-cli` fixture crate in `dry-run` mode — end-to-end validation of the pipeline itself. See [Testing](#testing). |
 
 ## `release.yml` inputs
 
@@ -33,6 +34,7 @@ duplication is intentional; see the comment at the top of each file.
 | --- | --- | --- | --- |
 | `bin-name` | string | *(required)* | Binary name, e.g. `hyalo`. |
 | `version-package` | string | *(required)* | Cargo package whose version must match the release tag, e.g. `hyalo-cli`. |
+| `workspace-dir` | string | `"."` | Path, relative to the caller repo root, to the Cargo workspace to build. Every `cargo`/`cross`/`cargo-deb`/`cargo-generate-rpm` invocation runs with this as its working directory. Used by `selftest.yml` to point at `testdata/fixture-cli`; app repos normally leave this at the default. |
 | `publish-crates` | string | `""` | Comma-separated, dependency-ordered list of crates to publish to crates.io. Empty skips crates.io. |
 | `targets` | string (JSON) | 7-target union (see below) | JSON array of `{"target", "os", "cross", "run_tests"}` matrix entries. |
 | `enable-sbom` | boolean | `true` | Generate a CycloneDX SBOM via `cargo-cyclonedx` on native (non-cross) targets. |
@@ -45,6 +47,8 @@ duplication is intentional; see the comment at the top of each file.
 | `winget-pkgs-fork` | string | `"ractive/winget-pkgs"` | Owner/repo of the winget-pkgs fork to sync and submit from. |
 | `homebrew-tap` | string | `"ractive/homebrew-tap"` | Homebrew tap repository to publish the formula to. |
 | `homebrew-formula` | string | `""` | Formula file name (without `.rb`). Empty falls back to `bin-name`. |
+| `homebrew-description` | string | `""` | Formula `desc` string. Empty falls back to `"<bin-name> CLI"`. |
+| `homebrew-caveats` | string | `""` | Formula caveats text, rendered inside a `def caveats` / `<<~EOS` block. Empty omits the caveats block entirely. |
 | `scoop-bucket` | string | `"ractive/scoop-bucket"` | Scoop bucket repository to publish the manifest to. |
 | `dry-run` | boolean | `false` | Build, test, package, and upload as workflow artifacts only. Skips tag verification (derives version from `cargo metadata` instead), GitHub release upload, crates.io, Homebrew, Scoop, winget, and attestation. |
 
@@ -129,6 +133,7 @@ jobs:
       version-package: hyalo-cli
       publish-crates: hyalo-core,hyalo-mdlint,hyalo-cli
       winget-identifier: ractive.hyalo
+      homebrew-description: "CLI for exploring and managing Markdown knowledge bases"
 ```
 
 ### hoppy
@@ -171,6 +176,12 @@ jobs:
         fi
         cargo xtask --output-dir man
       extra-archive-paths: completions man
+      homebrew-description: "CLI for bunny.net cloud and edge services"
+      homebrew-caveats: |
+        hoppy container logs requires bore for automatic tunnel setup:
+          cargo install bore-cli
+          brew install bore-cli
+        This is optional — see `hoppy container logs --help` for tunnel alternatives.
       targets: >-
         [
           {"target": "x86_64-unknown-linux-gnu",  "os": "ubuntu-latest",  "cross": false, "run_tests": true},
@@ -209,6 +220,7 @@ jobs:
       version-package: ff-rdp-cli
       publish-crates: ff-rdp-core,ff-rdp-cli
       winget-identifier: ractive.ff-rdp
+      homebrew-description: "CLI for Firefox Remote Debugging Protocol"
       targets: >-
         [
           {"target": "x86_64-unknown-linux-gnu",   "os": "ubuntu-latest",  "cross": false, "run_tests": true},
@@ -306,3 +318,72 @@ every consuming repo's next release.
   fork of `microsoft/winget-pkgs` under the `ractive` org. `winget-releaser`
   can only update packages that already exist upstream; the first submission
   of a new package must be done manually via PR to `microsoft/winget-pkgs`.
+
+## Testing
+
+This repo tests itself at three layers, each catching a different class of
+problem before it reaches an app repo's actual release:
+
+### 1. actionlint — syntax and shell correctness
+
+`ci.yml`'s `actionlint` job runs [actionlint](https://github.com/rhysd/actionlint)
+over every workflow file: YAML/expression syntax errors, invalid `uses:`
+references, type mismatches against `workflow_call` inputs, and — via its
+bundled shellcheck integration — common shell scripting bugs in `run:` steps
+(unquoted variables, unsafe globs, etc). This catches "the workflow won't
+even parse" and "this shell one-liner breaks on a filename with a space"
+class bugs, but it has no idea what the workflow's steps actually *do* at
+runtime.
+
+### 2. zizmor — GitHub Actions security static analysis
+
+`ci.yml`'s `zizmor` job runs [zizmor](https://docs.zizmor.sh) (pinned via
+`uvx --from zizmor==<version>`) over every workflow file: template-injection
+risks (untrusted `${{ }}` expansion spliced directly into a shell command
+rather than passed through `env:`), credential-persistence issues
+(`actions/checkout` leaking a token into an uploaded artifact), overbroad
+permissions, and similar. Findings must be fixed, not silenced — the only
+suppressions in this repo live in the committed [`zizmor.yml`](zizmor.yml),
+each with a comment explaining why it's a deliberate, reviewed exception
+(currently: two `use-trusted-publishing` findings recommending crates.io's
+OIDC-based trusted publishing over a long-lived `CARGO_TOKEN`, which would
+require reconfiguring publish rights for eight crates across three repos —
+tracked as a real follow-up, not dismissed as a false positive).
+
+### 3. selftest.yml — end-to-end dry-run against a fixture crate
+
+`selftest.yml` calls `release.yml` **from this same repo**
+(`uses: ./.github/workflows/release.yml`, which is valid for `workflow_call`
+and resolves at the triggering commit's SHA) against
+[`testdata/fixture-cli`](testdata/fixture-cli), a minimal, dependency-free
+Cargo workspace built specifically to exercise this pipeline. It runs with
+`dry-run: true`, `enable-sbom: true`, and `enable-linux-packages: true`
+across a 4-target matrix chosen to cover each distinct code path once:
+
+| Target | OS | Path exercised |
+| --- | --- | --- |
+| `x86_64-unknown-linux-gnu` | `ubuntu-latest` | Native build + test + SBOM + attestation-eligible path |
+| `x86_64-unknown-linux-musl` | `ubuntu-latest` | `cross`-containerized build (the `Cross.toml`/glibc-cache-poisoning path) |
+| `aarch64-apple-darwin` | `macos-latest` | Native macOS build |
+| `x86_64-pc-windows-msvc` | `windows-latest` | Windows `.zip` archive path (`7z`) |
+
+This means every PR to this repo gets real end-to-end validation of build,
+test, archive naming, SBOM generation, deb/rpm packaging, `SHA256SUMS`
+generation, and the dry-run summary — without touching crates.io, any
+Homebrew tap, Scoop bucket, winget fork, or any of the three app repos.
+
+### What's NOT covered by any of the above
+
+The publish-side jobs — `crates-io`, `homebrew`, `scoop`, `winget` — are
+skipped entirely in `dry-run` mode (see the `dry-run` input above), so
+`selftest.yml` never exercises the real crates.io upload, the Homebrew tap
+git push, the Scoop bucket git push, or the winget-releaser submission. Those
+paths are only exercised by a real release (`release` event) in an app repo.
+The [dry-run caller example](#dry-run-caller-validate-the-pipeline-without-cutting-a-release)
+above gives app repos an additional pre-release check — run it manually
+before cutting a tag to catch build/packaging problems without touching any
+publish destination — but it still can't validate the publish steps
+themselves. There is currently no automated test of the publish jobs; they
+rely on the retry/idempotency logic (documented inline in `release.yml` and
+`publish-crates.yml`) and on the "already uploaded/exists" and
+"unchanged, skipping commit" guards behaving correctly in production.

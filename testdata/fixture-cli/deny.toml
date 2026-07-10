@@ -1,0 +1,15 @@
+# cargo-deny config for the fixture-cli test fixture. The fixture has zero
+# external dependencies by design (see crates/fixture-cli/Cargo.toml), so
+# this only needs to allow the fixture's own MIT license.
+[licenses]
+allow = ["MIT"]
+
+[bans]
+multiple-versions = "warn"
+
+[advisories]
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

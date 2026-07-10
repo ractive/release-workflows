@@ -1,0 +1,20 @@
+# zizmor (https://docs.zizmor.sh) security-lint configuration for this repo's
+# own workflow files. Suppressions below are deliberate, reviewed exceptions
+# — not blanket rule disables. Every other finding zizmor reports must be
+# fixed, not suppressed (see .github/workflows/ci.yml, which runs zizmor with
+# this config on every push/PR).
+rules:
+  use-trusted-publishing:
+    ignore:
+      # Both files publish to crates.io with a long-lived CARGO_TOKEN
+      # (secrets.CARGO_TOKEN) rather than crates.io's OIDC-based trusted
+      # publishing. Trusted publishing requires configuring a per-crate trust
+      # relationship on crates.io itself for hyalo-core, hyalo-mdlint,
+      # hyalo-cli, bunny-net-api, bunny-syslog-receiver, hoppy-cli,
+      # ff-rdp-core, and ff-rdp-cli (eight crates across three repos, each
+      # needing an owner with publish rights on crates.io to opt in) — that's
+      # a real migration for a follow-up PR, not something this workflow
+      # authoring pass can do unilaterally. Tracked as a known gap, not a
+      # false positive.
+      - publish-crates.yml
+      - release.yml

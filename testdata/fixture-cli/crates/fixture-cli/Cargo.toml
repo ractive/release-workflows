@@ -1,0 +1,30 @@
+[package]
+name = "fixture-cli"
+description = "Minimal test fixture binary for release-workflows selftest.yml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "fixture-cli"
+path = "src/main.rs"
+
+[package.metadata.deb]
+maintainer = "ractive"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/fixture-cli", "usr/bin/", "755"],
+    ["../../LICENSE", "usr/share/doc/fixture-cli/", "644"],
+    ["../../README.md", "usr/share/doc/fixture-cli/", "644"],
+]
+extended-description = "A minimal test fixture crate used by release-workflows' selftest.yml to exercise the reusable release pipeline end-to-end."
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/fixture-cli", dest = "/usr/bin/fixture-cli", mode = "755" },
+    { source = "../../LICENSE", dest = "/usr/share/doc/fixture-cli/LICENSE", mode = "644", doc = true },
+    { source = "../../README.md", dest = "/usr/share/doc/fixture-cli/README.md", mode = "644", doc = true },
+]

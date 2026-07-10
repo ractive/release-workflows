@@ -22,6 +22,11 @@ on:
         description: "Cargo package whose version must match the release tag, e.g. hyalo-cli"
         required: true
         type: string
+      workspace-dir:
+        description: "Path (relative to the caller repo root) to the Cargo workspace to build. Default is the repo root itself. Used by selftest.yml to point at testdata/fixture-cli."
+        required: false
+        type: string
+        default: "."
       publish-crates:
         description: "Comma-separated, dependency-ordered list of crates to publish to crates.io. Empty skips crates.io."
         required: false
@@ -67,7 +72,7 @@ on:
         type: string
         default: ""
       extra-archive-paths:
-        description: "Newline- or space-separated extra paths (relative to workspace root) to include in archives alongside the binary, LICENSE and README"
+        description: "Newline- or space-separated extra paths (relative to workspace-dir) to include in archives alongside the binary, LICENSE and README"
         required: false
         type: string
         default: ""
@@ -88,6 +93,16 @@ on:
         default: "ractive/homebrew-tap"
       homebrew-formula:
         description: "Formula file name (without .rb). Empty falls back to bin-name."
+        required: false
+        type: string
+        default: ""
+      homebrew-description:
+        description: "Formula desc string. Empty falls back to '<bin-name> CLI'."
+        required: false
+        type: string
+        default: ""
+      homebrew-caveats:
+        description: "Formula caveats text (rendered inside a `def caveats` block). Empty omits the caveats block entirely."
         required: false
         type: string
         default: ""
@@ -119,12 +134,15 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Resolve and verify version
         id: version
         shell: bash
+        working-directory: ${{ inputs.workspace-dir }}
         env:
           VERSION_PACKAGE: ${{ inputs.version-package }}
           DRY_RUN: ${{ inputs.dry-run }}
@@ -161,10 +179,14 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: ${{ inputs.workspace-dir }}
 
       - name: Install security tools
         uses: taiki-e/install-action@a1df9120380005ebdc788c62449b841b205541dd # v2
@@ -172,9 +194,11 @@ jobs:
           tool: cargo-audit,cargo-deny
 
       - name: Audit dependencies for known vulnerabilities
+        working-directory: ${{ inputs.workspace-dir }}
         run: cargo audit
 
       - name: Check licenses, advisories, bans, and sources
+        working-directory: ${{ inputs.workspace-dir }}
         run: cargo deny check
 
   # ---------------------------------------------------------------------
@@ -191,6 +215,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
@@ -204,6 +230,7 @@ jobs:
           # job — which then fail inside the older-glibc cross image with
           # "version `GLIBC_2.28' not found".
           key: ${{ matrix.target }}
+          workspaces: ${{ inputs.workspace-dir }}
 
       - name: Install cross
         if: matrix.cross
@@ -223,24 +250,33 @@ jobs:
           echo "GIT_COMMIT_DATE=$(git show -s --date=short --format=%cd HEAD)" >> "$GITHUB_ENV"
 
       - name: Build release
+        working-directory: ${{ inputs.workspace-dir }}
         run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }}
 
       - name: Run tests
         if: matrix.run_tests
+        working-directory: ${{ inputs.workspace-dir }}
         run: ${{ matrix.cross && 'cross' || 'cargo' }} test --workspace --target ${{ matrix.target }}
 
       - name: Verify CLI runs
         if: '!matrix.cross && matrix.run_tests'
-        run: cargo run --release --target ${{ matrix.target }} -p ${{ inputs.version-package }} -- --help
+        shell: bash
+        working-directory: ${{ inputs.workspace-dir }}
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION_PACKAGE: ${{ inputs.version-package }}
+        run: cargo run --release --target "$TARGET" -p "$VERSION_PACKAGE" -- --help
 
       - name: Run pre-package command
         if: "!matrix.cross && inputs.pre-package-command != ''"
         shell: bash
+        working-directory: ${{ inputs.workspace-dir }}
         env:
           TARGET: ${{ matrix.target }}
           BIN_NAME: ${{ inputs.bin-name }}
           VERSION: ${{ needs.version-check.outputs.version }}
-        run: ${{ inputs.pre-package-command }}
+          INPUTS_PRE_PACKAGE_COMMAND: ${{ inputs.pre-package-command }}
+        run: ${INPUTS_PRE_PACKAGE_COMMAND}
 
       - name: Determine archive name
         shell: bash
@@ -257,16 +293,17 @@ jobs:
         env:
           BIN_NAME: ${{ inputs.bin-name }}
           EXTRA_ARCHIVE_PATHS: ${{ inputs.extra-archive-paths }}
+          WORKSPACE_DIR: ${{ inputs.workspace-dir }}
         run: |
           set -euo pipefail
           mkdir -p archive
-          cp "target/${{ matrix.target }}/release/${BIN_NAME}" archive/
-          [ -f LICENSE ] && cp LICENSE archive/
-          [ -f README.md ] && cp README.md archive/
+          cp "${WORKSPACE_DIR}/target/${{ matrix.target }}/release/${BIN_NAME}" archive/
+          [ -f "${WORKSPACE_DIR}/LICENSE" ] && cp "${WORKSPACE_DIR}/LICENSE" archive/
+          [ -f "${WORKSPACE_DIR}/README.md" ] && cp "${WORKSPACE_DIR}/README.md" archive/
           if [ -n "${EXTRA_ARCHIVE_PATHS}" ]; then
             for p in ${EXTRA_ARCHIVE_PATHS}; do
               mkdir -p "archive/$(dirname "$p")"
-              cp -r "$p" "archive/$p"
+              cp -r "${WORKSPACE_DIR}/$p" "archive/$p"
             done
           fi
           tar czf "${ARCHIVE_BASE}.tar.gz" -C archive .
@@ -277,16 +314,17 @@ jobs:
         env:
           BIN_NAME: ${{ inputs.bin-name }}
           EXTRA_ARCHIVE_PATHS: ${{ inputs.extra-archive-paths }}
+          WORKSPACE_DIR: ${{ inputs.workspace-dir }}
         run: |
           set -euo pipefail
           mkdir -p archive
-          cp "target/${{ matrix.target }}/release/${BIN_NAME}.exe" archive/
-          [ -f LICENSE ] && cp LICENSE archive/
-          [ -f README.md ] && cp README.md archive/
+          cp "${WORKSPACE_DIR}/target/${{ matrix.target }}/release/${BIN_NAME}.exe" archive/
+          [ -f "${WORKSPACE_DIR}/LICENSE" ] && cp "${WORKSPACE_DIR}/LICENSE" archive/
+          [ -f "${WORKSPACE_DIR}/README.md" ] && cp "${WORKSPACE_DIR}/README.md" archive/
           if [ -n "${EXTRA_ARCHIVE_PATHS}" ]; then
             for p in ${EXTRA_ARCHIVE_PATHS}; do
               mkdir -p "archive/$(dirname "$p")"
-              cp -r "$p" "archive/$p"
+              cp -r "${WORKSPACE_DIR}/$p" "archive/$p"
             done
           fi
           cd archive
@@ -301,6 +339,9 @@ jobs:
       - name: Generate CycloneDX SBOM
         if: inputs.enable-sbom && !matrix.cross
         shell: bash
+        working-directory: ${{ inputs.workspace-dir }}
+        env:
+          BIN_VERSION_PACKAGE: ${{ inputs.version-package }}
         run: |
           set -euo pipefail
           cargo cyclonedx --format json --target ${{ matrix.target }}
@@ -312,9 +353,12 @@ jobs:
             cp "$f" "sbom/$(basename "$(dirname "$f")")-${{ matrix.target }}.cdx.json"
           done
           ls -la sbom
-          bin_sbom="sbom/${{ inputs.version-package }}-${{ matrix.target }}.cdx.json"
+          bin_sbom="sbom/${BIN_VERSION_PACKAGE}-${{ matrix.target }}.cdx.json"
           if [ -f "$bin_sbom" ]; then
-            cp "$bin_sbom" "${ARCHIVE_BASE}.cdx.json"
+            # GITHUB_WORKSPACE is the job's absolute checkout root — using it
+            # (rather than a relative "..") keeps this correct regardless of
+            # how deep workspace-dir is nested.
+            cp "$bin_sbom" "${GITHUB_WORKSPACE}/${ARCHIVE_BASE}.cdx.json"
           else
             echo "WARNING: no SBOM found at $bin_sbom, skipping SBOM attach for this target"
           fi
@@ -347,28 +391,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: linux-packages
+          workspaces: ${{ inputs.workspace-dir }}
 
       - name: Build release binary
+        working-directory: ${{ inputs.workspace-dir }}
         run: cargo build --release --locked
 
       - name: Run pre-package command
         if: inputs.pre-package-command != ''
         shell: bash
+        working-directory: ${{ inputs.workspace-dir }}
         env:
           TARGET: x86_64-unknown-linux-gnu
           BIN_NAME: ${{ inputs.bin-name }}
           VERSION: ${{ needs.version-check.outputs.version }}
-        run: ${{ inputs.pre-package-command }}
+          INPUTS_PRE_PACKAGE_COMMAND: ${{ inputs.pre-package-command }}
+        run: ${INPUTS_PRE_PACKAGE_COMMAND}
 
       - name: Resolve package crate directory
         id: pkgdir
         shell: bash
+        working-directory: ${{ inputs.workspace-dir }}
         env:
           LINUX_PACKAGE_CRATE: ${{ inputs.linux-package-crate }}
           VERSION_PACKAGE: ${{ inputs.version-package }}
@@ -392,26 +443,33 @@ jobs:
         # cargo-deb picks up the binary from target/release/ and assets from
         # [package.metadata.deb] in the package's own Cargo.toml, resolved
         # relative to that package directory.
-        run: cargo deb -p "${{ steps.pkgdir.outputs.crate }}" --no-build --no-strip
+        working-directory: ${{ inputs.workspace-dir }}
+        run: cargo deb -p "${STEPS_PKGDIR_OUTPUTS_CRATE}" --no-build --no-strip
+        env:
+          STEPS_PKGDIR_OUTPUTS_CRATE: ${{ steps.pkgdir.outputs.crate }}
 
       - name: Build rpm package
         # cargo-generate-rpm's `-p` is a path (NOT a workspace package name
-        # like cargo's own -p flag). It reads
-        # [package.metadata.generate-rpm] from that Cargo.toml.
-        run: cargo generate-rpm -p "${{ steps.pkgdir.outputs.dir }}"
+        # like cargo's own -p flag), resolved relative to this step's cwd. It
+        # reads [package.metadata.generate-rpm] from that Cargo.toml.
+        working-directory: ${{ inputs.workspace-dir }}
+        run: cargo generate-rpm -p "${STEPS_PKGDIR_OUTPUTS_DIR}"
+        env:
+          STEPS_PKGDIR_OUTPUTS_DIR: ${{ steps.pkgdir.outputs.dir }}
 
       - name: Rename packages with version
         shell: bash
         env:
           BIN_NAME: ${{ inputs.bin-name }}
           VERSION: ${{ needs.version-check.outputs.version }}
+          WORKSPACE_DIR: ${{ inputs.workspace-dir }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          for f in target/debian/*.deb; do
+          for f in "${WORKSPACE_DIR}"/target/debian/*.deb; do
             cp "$f" "dist/${BIN_NAME}-v${VERSION}-x86_64-linux.deb"
           done
-          for f in target/generate-rpm/*.rpm; do
+          for f in "${WORKSPACE_DIR}"/target/generate-rpm/*.rpm; do
             cp "$f" "dist/${BIN_NAME}-v${VERSION}-x86_64-linux.rpm"
           done
 
@@ -443,6 +501,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Download all artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -459,7 +519,8 @@ jobs:
       - name: Upload assets to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" artifacts/*
+          GITHUB_EVENT_RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
+        run: gh release upload "${GITHUB_EVENT_RELEASE_TAG_NAME}" artifacts/*
 
   # ---------------------------------------------------------------------
   # 6. Dry-run summary (only in dry-run)
@@ -519,10 +580,14 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: ${{ inputs.workspace-dir }}
 
       - name: Verify CARGO_TOKEN is set
         env:
@@ -540,6 +605,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
           PUBLISH_CRATES: ${{ inputs.publish-crates }}
         shell: bash
+        working-directory: ${{ inputs.workspace-dir }}
         # Duplicated from publish-crates.yml by design — see the file header
         # in this workflow for why reusable workflows can't share scripts.
         run: |
@@ -597,12 +663,15 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Download SHA256SUMS from release
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_EVENT_RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
-          gh release download "${{ github.event.release.tag_name }}" \
+          gh release download "${GITHUB_EVENT_RELEASE_TAG_NAME}" \
             --pattern "SHA256SUMS" --dir .
 
       - name: Update Homebrew formula
@@ -610,6 +679,8 @@ jobs:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           BIN_NAME: ${{ inputs.bin-name }}
           FORMULA_NAME: ${{ inputs.homebrew-formula }}
+          FORMULA_DESCRIPTION: ${{ inputs.homebrew-description }}
+          FORMULA_CAVEATS: ${{ inputs.homebrew-caveats }}
           HOMEBREW_TAP: ${{ inputs.homebrew-tap }}
           VERSION: ${{ needs.version-check.outputs.version }}
         run: |
@@ -621,6 +692,7 @@ jobs:
           fi
 
           FORMULA_NAME="${FORMULA_NAME:-$BIN_NAME}"
+          FORMULA_DESCRIPTION="${FORMULA_DESCRIPTION:-${BIN_NAME} CLI}"
           REPO="${GITHUB_REPOSITORY}"
           RELEASE_URL="https://github.com/${REPO}/releases/download"
 
@@ -668,7 +740,7 @@ jobs:
             echo "# Homebrew formula for ${BIN_NAME}."
             echo "# Auto-updated by the release workflow in ${REPO}."
             echo "class $(echo "$FORMULA_NAME" | sed -E 's/(^|-)([a-z])/\U\2/g') < Formula"
-            echo "  desc \"${BIN_NAME} CLI\""
+            echo "  desc \"${FORMULA_DESCRIPTION}\""
             echo "  homepage \"https://github.com/${REPO}\""
             echo "  version \"${VERSION}\""
             echo "  license \"MIT\""
@@ -704,6 +776,16 @@ jobs:
             echo "    bin.install \"${BIN_NAME}\""
             echo "  end"
             echo ""
+            if [ -n "$FORMULA_CAVEATS" ]; then
+              echo "  def caveats"
+              echo "    <<~EOS"
+              while IFS= read -r line; do
+                echo "      ${line}"
+              done <<< "$FORMULA_CAVEATS"
+              echo "    EOS"
+              echo "  end"
+              echo ""
+            fi
             echo "  test do"
             echo "    assert_match version.to_s, shell_output(\"#{bin}/${BIN_NAME} --version\")"
             echo "  end"
@@ -736,12 +818,15 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Download SHA256SUMS from release
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_EVENT_RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
-          gh release download "${{ github.event.release.tag_name }}" \
+          gh release download "${GITHUB_EVENT_RELEASE_TAG_NAME}" \
             --pattern "SHA256SUMS" --dir .
 
       - name: Update Scoop manifest
@@ -877,7 +962,8 @@ jobs:
       - name: Sync winget-pkgs fork
         env:
           GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
-        run: gh repo sync "${{ inputs.winget-pkgs-fork }}"
+          INPUTS_WINGET_PKGS_FORK: ${{ inputs.winget-pkgs-fork }}
+        run: gh repo sync "${INPUTS_WINGET_PKGS_FORK}"
 
       - name: Submit to winget-pkgs
         uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2

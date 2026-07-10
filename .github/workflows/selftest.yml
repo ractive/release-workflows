@@ -1,0 +1,45 @@
+# End-to-end integration test for release.yml. Calls the reusable workflow
+# from THIS repo (uses: ./.github/workflows/release.yml is valid for
+# workflow_call and runs at the triggering commit's SHA), pointed at the
+# fixture crate under testdata/fixture-cli, in dry-run mode. This exercises
+# the real build/test/archive/SBOM/deb-rpm/SHA256SUMS/dry-run-summary code
+# paths on every PR without touching crates.io, Homebrew, Scoop, winget, or
+# any app repo.
+name: Selftest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selftest-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: read
+    with:
+      bin-name: fixture-cli
+      version-package: fixture-cli
+      workspace-dir: testdata/fixture-cli
+      dry-run: true
+      enable-sbom: true
+      enable-attestation: false
+      enable-linux-packages: true
+      linux-package-crate: fixture-cli
+      # One target per distinct code path: native Linux build+test, a cross
+      # (containerized) Linux build to exercise the cross/Cross.toml path,
+      # a native macOS build, and the Windows zip-archive path.
+      targets: >-
+        [
+          {"target": "x86_64-unknown-linux-gnu",  "os": "ubuntu-latest",  "cross": false, "run_tests": true},
+          {"target": "x86_64-unknown-linux-musl", "os": "ubuntu-latest",  "cross": true,  "run_tests": true},
+          {"target": "aarch64-apple-darwin",      "os": "macos-latest",  "cross": false, "run_tests": true},
+          {"target": "x86_64-pc-windows-msvc",    "os": "windows-latest", "cross": false, "run_tests": true}
+        ]
