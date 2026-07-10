@@ -298,7 +298,7 @@ jobs:
           BIN_NAME: ${{ inputs.bin-name }}
           VERSION: ${{ needs.version-check.outputs.version }}
           INPUTS_PRE_PACKAGE_COMMAND: ${{ inputs.pre-package-command }}
-        run: ${INPUTS_PRE_PACKAGE_COMMAND}
+        run: eval "$INPUTS_PRE_PACKAGE_COMMAND"
 
       - name: Determine archive name
         shell: bash
@@ -451,7 +451,7 @@ jobs:
           BIN_NAME: ${{ inputs.bin-name }}
           VERSION: ${{ needs.version-check.outputs.version }}
           INPUTS_PRE_PACKAGE_COMMAND: ${{ inputs.pre-package-command }}
-        run: ${INPUTS_PRE_PACKAGE_COMMAND}
+        run: eval "$INPUTS_PRE_PACKAGE_COMMAND"
 
       - name: Resolve package crate directory
         id: pkgdir

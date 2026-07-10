@@ -39,6 +39,13 @@ jobs:
       enable-attestation: false
       enable-linux-packages: true
       linux-package-crate: fixture-cli
+      # Deliberately multi-line: guards the eval-based execution of this
+      # input (a bare ${VAR} expansion once flattened the newlines into one
+      # giant argument list — real bug caught by hoppy's first dry-run).
+      pre-package-command: |
+        mkdir -p extras
+        echo "target=$TARGET cross=$CROSS version=$VERSION" > extras/buildinfo.txt
+      extra-archive-paths: extras
       # One target per distinct code path: native Linux build+test, a cross
       # (containerized) Linux build to exercise the cross/Cross.toml path,
       # a native macOS build, and the Windows zip-archive path.
