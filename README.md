@@ -47,7 +47,7 @@ duplication is intentional; see the comment at the top of each file.
 | `winget-pkgs-fork` | string | `"ractive/winget-pkgs"` | Owner/repo of the winget-pkgs fork to sync and submit from. |
 | `homebrew-tap` | string | `"ractive/homebrew-tap"` | Homebrew tap repository to publish the formula to. |
 | `homebrew-formula` | string | `""` | Formula file name (without `.rb`). Empty falls back to `bin-name`. |
-| `homebrew-description` | string | `""` | Formula `desc` string. Empty falls back to `"<bin-name> CLI"`. |
+| `homebrew-description` | string | `""` | Description for the Homebrew formula `desc` and the Scoop manifest. Empty falls back to the `version-package` crate's `description` in Cargo.toml, then to `"<bin-name> CLI"` — so most callers never set this. |
 | `homebrew-caveats` | string | `""` | Formula caveats text, rendered inside a `def caveats` / `<<~EOS` block. Empty omits the caveats block entirely. |
 | `scoop-bucket` | string | `"ractive/scoop-bucket"` | Scoop bucket repository to publish the manifest to. |
 | `dry-run` | boolean | `false` | Build, test, package, and upload as workflow artifacts only. Skips tag verification (derives version from `cargo metadata` instead), GitHub release upload, crates.io, Homebrew, Scoop, winget, and attestation. |
@@ -98,8 +98,7 @@ below.
 
 ## Required caller permissions
 
-Callers must grant these permissions to the calling workflow (they flow
-through to the reusable workflow's jobs):
+Callers must grant these permissions to the calling job:
 
 ```yaml
 permissions:
@@ -108,7 +107,22 @@ permissions:
   attestations: write     # write attestations to the repo's attestation store
 ```
 
-If `enable-attestation` is `false`, `id-token`/`attestations` can be omitted.
+`release.yml` deliberately declares no workflow-level `permissions:` block.
+Jobs that need a specific permission (e.g. `release`'s `contents: write`)
+declare it themselves for least privilege, but `build` and `linux-packages`
+declare none at all and instead **inherit whatever the caller granted**. This
+is required, not incidental: a called workflow's job that explicitly
+requests a permission the caller didn't grant hard-fails immediately, even
+if the step that would need it is skipped at runtime. `build`'s attestation
+step only needs `id-token`/`attestations` conditionally (`enable-attestation`
+and not `dry-run`), so it cannot declare that requirement explicitly without
+breaking every caller that doesn't grant it — including `selftest.yml`, whose
+caller job only grants `contents: read`. Inheritance is the only shape that
+serves both a full production release and a read-only dry-run from the same
+job definition.
+
+If `enable-attestation` is `false`, `id-token`/`attestations` can be omitted
+from the caller's grant.
 
 ## Example callers
 
@@ -133,8 +147,10 @@ jobs:
       version-package: hyalo-cli
       publish-crates: hyalo-core,hyalo-mdlint,hyalo-cli
       winget-identifier: ractive.hyalo
-      homebrew-description: "CLI for exploring and managing Markdown knowledge bases"
 ```
+
+The Homebrew/Scoop description is derived automatically from `hyalo-cli`'s
+`description` field in Cargo.toml.
 
 ### hoppy
 
@@ -176,7 +192,6 @@ jobs:
         fi
         cargo xtask --output-dir man
       extra-archive-paths: completions man
-      homebrew-description: "CLI for bunny.net cloud and edge services"
       homebrew-caveats: |
         hoppy container logs requires bore for automatic tunnel setup:
           cargo install bore-cli
@@ -220,7 +235,6 @@ jobs:
       version-package: ff-rdp-cli
       publish-crates: ff-rdp-core,ff-rdp-cli
       winget-identifier: ractive.ff-rdp
-      homebrew-description: "CLI for Firefox Remote Debugging Protocol"
       targets: >-
         [
           {"target": "x86_64-unknown-linux-gnu",   "os": "ubuntu-latest",  "cross": false, "run_tests": true},

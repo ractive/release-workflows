@@ -97,7 +97,7 @@ on:
         type: string
         default: ""
       homebrew-description:
-        description: "Formula desc string. Empty falls back to '<bin-name> CLI'."
+        description: "Description for the Homebrew formula desc and Scoop manifest. Empty falls back to the version-package crate's Cargo.toml description, then '<bin-name> CLI'."
         required: false
         type: string
         default: ""
@@ -120,7 +120,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-permissions: {}
+# No workflow-level permissions block: jobs that declare their own get least
+# privilege, while `build` and `linux-packages` deliberately inherit the
+# CALLER's grant. `build` conditionally needs id-token/attestations for
+# provenance attestation, and a called workflow's job that explicitly
+# requests more than the caller granted hard-fails even when the needing
+# step is skipped — inheritance is the only shape that serves both real
+# releases (full grant) and the dry-run selftest (contents: read).
 
 jobs:
   # ---------------------------------------------------------------------
@@ -132,6 +138,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      description: ${{ steps.version.outputs.description }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -149,11 +156,16 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r --arg pkg "$VERSION_PACKAGE" '.packages[] | select(.name == $pkg) | .version')
+          META=$(cargo metadata --no-deps --format-version 1)
+          CARGO_VERSION=$(echo "$META" | jq -r --arg pkg "$VERSION_PACKAGE" '.packages[] | select(.name == $pkg) | .version')
           if [ -z "$CARGO_VERSION" ]; then
             echo "ERROR: package '$VERSION_PACKAGE' not found via cargo metadata" >&2
             exit 1
           fi
+          # The crate's description doubles as the Homebrew formula desc and
+          # Scoop manifest description (overridable via homebrew-description).
+          CARGO_DESCRIPTION=$(echo "$META" | jq -r --arg pkg "$VERSION_PACKAGE" '.packages[] | select(.name == $pkg) | .description // ""')
+          echo "description=$CARGO_DESCRIPTION" >> "$GITHUB_OUTPUT"
 
           if [ "$DRY_RUN" = "true" ]; then
             echo "Dry run: skipping tag comparison, using Cargo.toml version $CARGO_VERSION"
@@ -367,10 +379,9 @@ jobs:
         if: inputs.enable-attestation && !matrix.cross && !inputs.dry-run
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
-          subject-path: |
-            ${{ env.ARCHIVE_BASE }}.tar.gz
-            ${{ env.ARCHIVE_BASE }}.zip
-            ${{ env.ARCHIVE_BASE }}.cdx.json
+          # A single glob: only one of .tar.gz/.zip exists per platform, and
+          # the action errors on literal paths that match nothing.
+          subject-path: ${{ env.ARCHIVE_BASE }}.*
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -680,6 +691,7 @@ jobs:
           BIN_NAME: ${{ inputs.bin-name }}
           FORMULA_NAME: ${{ inputs.homebrew-formula }}
           FORMULA_DESCRIPTION: ${{ inputs.homebrew-description }}
+          CARGO_DESCRIPTION: ${{ needs.version-check.outputs.description }}
           FORMULA_CAVEATS: ${{ inputs.homebrew-caveats }}
           HOMEBREW_TAP: ${{ inputs.homebrew-tap }}
           VERSION: ${{ needs.version-check.outputs.version }}
@@ -692,7 +704,8 @@ jobs:
           fi
 
           FORMULA_NAME="${FORMULA_NAME:-$BIN_NAME}"
-          FORMULA_DESCRIPTION="${FORMULA_DESCRIPTION:-${BIN_NAME} CLI}"
+          # Precedence: explicit input > crate description > generic fallback
+          FORMULA_DESCRIPTION="${FORMULA_DESCRIPTION:-${CARGO_DESCRIPTION:-${BIN_NAME} CLI}}"
           REPO="${GITHUB_REPOSITORY}"
           RELEASE_URL="https://github.com/${REPO}/releases/download"
 
@@ -836,6 +849,8 @@ jobs:
           BIN_NAME: ${{ inputs.bin-name }}
           SCOOP_BUCKET: ${{ inputs.scoop-bucket }}
           VERSION: ${{ needs.version-check.outputs.version }}
+          OVERRIDE_DESCRIPTION: ${{ inputs.homebrew-description }}
+          CARGO_DESCRIPTION: ${{ needs.version-check.outputs.description }}
         run: |
           set -euo pipefail
 
@@ -845,6 +860,8 @@ jobs:
           fi
 
           REPO="${GITHUB_REPOSITORY}"
+          # Same precedence as the Homebrew formula desc.
+          DESCRIPTION="${OVERRIDE_DESCRIPTION:-${CARGO_DESCRIPTION:-${BIN_NAME} CLI}}"
 
           get_sha() {
             awk -v file="$1" '$2 == file {print $1}' SHA256SUMS
@@ -868,6 +885,7 @@ jobs:
           jq -n \
             --arg version "$VERSION" \
             --arg bin_name "$BIN_NAME" \
+            --arg description "$DESCRIPTION" \
             --arg repo "$REPO" \
             --arg release_url "$RELEASE_URL" \
             --arg win_x64_file "$WIN_X64_FILE" \
@@ -884,7 +902,7 @@ jobs:
               else empty end;
             {
               version: $version,
-              description: "\($bin_name) CLI",
+              description: $description,
               homepage: "https://github.com/\($repo)",
               license: "MIT",
               architecture: (
