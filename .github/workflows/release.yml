@@ -51,6 +51,11 @@ on:
         required: false
         type: boolean
         default: true
+      sbom-packages:
+        description: "Comma-separated packages to attach SBOMs for. Empty falls back to version-package only. The version-package SBOM is named <archive>.cdx.json; extras are <archive>-<package>.cdx.json."
+        required: false
+        type: string
+        default: ""
       enable-attestation:
         description: "Attest build provenance on native (non-cross) targets"
         required: false
@@ -359,34 +364,48 @@ jobs:
         working-directory: ${{ inputs.workspace-dir }}
         env:
           BIN_VERSION_PACKAGE: ${{ inputs.version-package }}
+          SBOM_PACKAGES: ${{ inputs.sbom-packages }}
         run: |
           set -euo pipefail
           cargo cyclonedx --format json --target ${{ matrix.target }}
           # cargo-cyclonedx writes one SBOM per package next to its
-          # Cargo.toml; collect the one for the released binary crate so it
-          # travels alongside the archive.
+          # Cargo.toml; collect them so the requested ones can travel
+          # alongside the archive.
           mkdir -p sbom
           find . -path './target' -prune -o -name '*.cdx.json' -print | while read -r f; do
             cp "$f" "sbom/$(basename "$(dirname "$f")")-${{ matrix.target }}.cdx.json"
           done
           ls -la sbom
-          bin_sbom="sbom/${BIN_VERSION_PACKAGE}-${{ matrix.target }}.cdx.json"
-          if [ -f "$bin_sbom" ]; then
-            # GITHUB_WORKSPACE is the job's absolute checkout root — using it
-            # (rather than a relative "..") keeps this correct regardless of
-            # how deep workspace-dir is nested.
-            cp "$bin_sbom" "${GITHUB_WORKSPACE}/${ARCHIVE_BASE}.cdx.json"
-          else
-            echo "WARNING: no SBOM found at $bin_sbom, skipping SBOM attach for this target"
-          fi
+          IFS=',' read -ra pkgs <<< "${SBOM_PACKAGES:-$BIN_VERSION_PACKAGE}"
+          for pkg in "${pkgs[@]}"; do
+            pkg="$(echo "$pkg" | xargs)"
+            [ -z "$pkg" ] && continue
+            src="sbom/${pkg}-${{ matrix.target }}.cdx.json"
+            # The version-package SBOM keeps the bare archive name for
+            # backward compatibility; extras are suffixed with the package.
+            if [ "$pkg" = "$BIN_VERSION_PACKAGE" ]; then
+              dest="${ARCHIVE_BASE}.cdx.json"
+            else
+              dest="${ARCHIVE_BASE}-${pkg}.cdx.json"
+            fi
+            if [ -f "$src" ]; then
+              # GITHUB_WORKSPACE is the job's absolute checkout root — using
+              # it (rather than a relative "..") keeps this correct
+              # regardless of how deep workspace-dir is nested.
+              cp "$src" "${GITHUB_WORKSPACE}/${dest}"
+            else
+              echo "WARNING: no SBOM found at $src, skipping SBOM attach for $pkg on this target"
+            fi
+          done
 
       - name: Attest build provenance
         if: inputs.enable-attestation && !matrix.cross && !inputs.dry-run
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
-          # A single glob: only one of .tar.gz/.zip exists per platform, and
-          # the action errors on literal paths that match nothing.
-          subject-path: ${{ env.ARCHIVE_BASE }}.*
+          # A single prefix glob: only one of .tar.gz/.zip exists per
+          # platform, the action errors on literal paths that match nothing,
+          # and extra SBOMs are named <archive>-<package>.cdx.json.
+          subject-path: ${{ env.ARCHIVE_BASE }}*
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -396,6 +415,7 @@ jobs:
             ${{ env.ARCHIVE_BASE }}.tar.gz
             ${{ env.ARCHIVE_BASE }}.zip
             ${{ env.ARCHIVE_BASE }}.cdx.json
+            ${{ env.ARCHIVE_BASE }}-*.cdx.json
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------------

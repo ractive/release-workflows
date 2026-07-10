@@ -38,6 +38,7 @@ duplication is intentional; see the comment at the top of each file.
 | `publish-crates` | string | `""` | Comma-separated, dependency-ordered list of crates to publish to crates.io. Empty skips crates.io. |
 | `targets` | string (JSON) | 7-target union (see below) | JSON array of `{"target", "os", "cross", "run_tests"}` matrix entries. |
 | `enable-sbom` | boolean | `true` | Generate a CycloneDX SBOM via `cargo-cyclonedx` on native (non-cross) targets. |
+| `sbom-packages` | string | `""` | Comma-separated packages to attach SBOMs for. Empty falls back to `version-package` only. The `version-package` SBOM is named `<archive>.cdx.json`; extras are `<archive>-<package>.cdx.json`. |
 | `enable-attestation` | boolean | `true` | Attest build provenance via `actions/attest-build-provenance` on native targets. Cross containers lack OIDC, so cross targets are always skipped. Skipped entirely in dry-run. |
 | `enable-linux-packages` | boolean | `false` | Build `.deb` and `.rpm` packages from a native `x86_64-unknown-linux-gnu` build via `cargo-deb` + `cargo-generate-rpm`. |
 | `linux-package-crate` | string | `""` | Crate to package for deb/rpm. Empty falls back to `version-package`. |
@@ -241,6 +242,8 @@ jobs:
       version-package: ff-rdp-cli
       publish-crates: ff-rdp-core,ff-rdp-cli
       winget-identifier: ractive.ff-rdp
+      # ff-rdp ships SBOMs for both published crates, not just the CLI:
+      sbom-packages: ff-rdp-cli,ff-rdp-core
       targets: >-
         [
           {"target": "x86_64-unknown-linux-gnu",   "os": "ubuntu-latest",  "cross": false, "run_tests": true},
