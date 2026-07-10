@@ -44,7 +44,12 @@ jobs:
       # giant argument list — real bug caught by hoppy's first dry-run).
       pre-package-command: |
         mkdir -p extras
-        echo "target=$TARGET cross=$CROSS version=$VERSION" > extras/buildinfo.txt
+        echo "target=$TARGET cross=$CROSS version=$VERSION bin=$BIN_PATH" > extras/buildinfo.txt
+        if [ "$CROSS" != "true" ]; then
+          # Validates that BIN_PATH resolves to a runnable binary on native
+          # targets (including .exe resolution on Windows).
+          "$BIN_PATH" --version >> extras/buildinfo.txt
+        fi
       extra-archive-paths: extras
       # One target per distinct code path: native Linux build+test, a cross
       # (containerized) Linux build to exercise the cross/Cross.toml path,

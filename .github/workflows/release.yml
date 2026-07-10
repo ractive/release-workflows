@@ -72,7 +72,7 @@ on:
         type: string
         default: ""
       pre-package-command:
-        description: "Bash command run after the build, before archiving/packaging (e.g. generate completions/man pages). Runs on every matrix target and in the linux-packages job. TARGET, CROSS, BIN_NAME, VERSION are exported; when CROSS=true the target binary is not host-runnable, so produce files with a host build (e.g. cargo run) instead."
+        description: "Bash command run after the build, before archiving/packaging (e.g. generate completions/man pages). Runs on every matrix target and in the linux-packages job. TARGET, CROSS, BIN_NAME, VERSION, BIN_PATH are exported; BIN_PATH is the built binary (relative to workspace-dir). When CROSS=true that binary is not host-runnable, so produce files with a host build (e.g. cargo run --bin) instead."
         required: false
         type: string
         default: ""
@@ -282,7 +282,10 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           VERSION_PACKAGE: ${{ inputs.version-package }}
-        run: cargo run --release --target "$TARGET" -p "$VERSION_PACKAGE" -- --help
+          BIN_NAME: ${{ inputs.bin-name }}
+        # --bin disambiguates packages that ship more than one binary
+        # (hoppy-cli has hoppy + fixture-refresh; bare -p is an error there).
+        run: cargo run --release --target "$TARGET" -p "$VERSION_PACKAGE" --bin "$BIN_NAME" -- --help
 
       - name: Run pre-package command
         # Runs for cross targets too: their archives need the same extra
@@ -298,7 +301,13 @@ jobs:
           BIN_NAME: ${{ inputs.bin-name }}
           VERSION: ${{ needs.version-check.outputs.version }}
           INPUTS_PRE_PACKAGE_COMMAND: ${{ inputs.pre-package-command }}
-        run: eval "$INPUTS_PRE_PACKAGE_COMMAND"
+        # BIN_PATH points at the binary this job actually built (relative to
+        # workspace-dir). On cross targets it exists but is not host-runnable.
+        run: |
+          BIN_PATH="target/${TARGET}/release/${BIN_NAME}"
+          [ -f "${BIN_PATH}.exe" ] && BIN_PATH="${BIN_PATH}.exe"
+          export BIN_PATH
+          eval "$INPUTS_PRE_PACKAGE_COMMAND"
 
       - name: Determine archive name
         shell: bash
@@ -451,7 +460,12 @@ jobs:
           BIN_NAME: ${{ inputs.bin-name }}
           VERSION: ${{ needs.version-check.outputs.version }}
           INPUTS_PRE_PACKAGE_COMMAND: ${{ inputs.pre-package-command }}
-        run: eval "$INPUTS_PRE_PACKAGE_COMMAND"
+        # This job builds without --target, so the binary lands in
+        # target/release/ — BIN_PATH abstracts that difference for callers.
+        run: |
+          BIN_PATH="target/release/${BIN_NAME}"
+          export BIN_PATH
+          eval "$INPUTS_PRE_PACKAGE_COMMAND"
 
       - name: Resolve package crate directory
         id: pkgdir

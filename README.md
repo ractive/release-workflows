@@ -42,7 +42,7 @@ duplication is intentional; see the comment at the top of each file.
 | `enable-attestation` | boolean | `true` | Attest build provenance via `actions/attest-build-provenance` on native targets. Cross containers lack OIDC, so cross targets are always skipped. Skipped entirely in dry-run. |
 | `enable-linux-packages` | boolean | `false` | Build `.deb` and `.rpm` packages from a native `x86_64-unknown-linux-gnu` build via `cargo-deb` + `cargo-generate-rpm`. |
 | `linux-package-crate` | string | `""` | Crate to package for deb/rpm. Empty falls back to `version-package`. |
-| `pre-package-command` | string | `""` | Bash command run after the build, before archiving/packaging (e.g. generate shell completions or man pages). Runs on every matrix target and in the linux-packages job. `TARGET`, `CROSS`, `BIN_NAME`, `VERSION` are exported; when `CROSS=true` the target binary is not host-runnable, so produce files with a host build (e.g. `cargo run`) instead. |
+| `pre-package-command` | string | `""` | Bash command run after the build, before archiving/packaging (e.g. generate shell completions or man pages). Runs on every matrix target and in the linux-packages job. `TARGET`, `CROSS`, `BIN_NAME`, `VERSION`, `BIN_PATH` are exported; `BIN_PATH` is the built binary (relative to workspace-dir, `.exe` resolved on Windows). When `CROSS=true` that binary is not host-runnable, so produce files with a host build (e.g. `cargo run --bin <bin> --`) instead. |
 | `extra-archive-paths` | string | `""` | Newline- or space-separated extra paths (relative to workspace root) to include in archives alongside the binary, `LICENSE`, and `README.md`. |
 | `winget-identifier` | string | `""` | e.g. `ractive.hyalo`. Empty skips winget. |
 | `winget-pkgs-fork` | string | `"ractive/winget-pkgs"` | Owner/repo of the winget-pkgs fork to sync and submit from. |
@@ -182,15 +182,14 @@ jobs:
         mkdir -p completions man
         if [ "$CROSS" = "true" ] || [ "$TARGET" = "aarch64-pc-windows-msvc" ]; then
           # Target binary is not host-runnable: generate with a host build.
-          cargo run --release -- completions bash  > completions/hoppy.bash
-          cargo run --release -- completions zsh   > completions/_hoppy
-          cargo run --release -- completions fish  > completions/hoppy.fish
+          # --bin disambiguates: hoppy-cli ships more than one binary.
+          cargo run --release --bin hoppy -- completions bash  > completions/hoppy.bash
+          cargo run --release --bin hoppy -- completions zsh   > completions/_hoppy
+          cargo run --release --bin hoppy -- completions fish  > completions/hoppy.fish
         else
-          BIN="target/$TARGET/release/hoppy"
-          [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
-          "$BIN" completions bash > completions/hoppy.bash
-          "$BIN" completions zsh  > completions/_hoppy
-          "$BIN" completions fish > completions/hoppy.fish
+          "$BIN_PATH" completions bash > completions/hoppy.bash
+          "$BIN_PATH" completions zsh  > completions/_hoppy
+          "$BIN_PATH" completions fish > completions/hoppy.fish
         fi
         cargo xtask --output-dir man
         # cargo-deb / cargo-generate-rpm resolve [package.metadata.*] asset
@@ -204,12 +203,15 @@ jobs:
           cargo install bore-cli
           brew install bore-cli
         This is optional — see `hoppy container logs --help` for tunnel alternatives.
+      # run_tests is false everywhere: hoppy's release pipeline has never run
+      # tests (PR CI covers them, on ubuntu). Its Windows CLI tests overflow
+      # the default 1 MB MSVC stack, so enabling them here would break.
       targets: >-
         [
-          {"target": "x86_64-unknown-linux-gnu",  "os": "ubuntu-latest",  "cross": false, "run_tests": true},
+          {"target": "x86_64-unknown-linux-gnu",  "os": "ubuntu-latest",  "cross": false, "run_tests": false},
           {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-latest",  "cross": true,  "run_tests": false},
-          {"target": "aarch64-apple-darwin",      "os": "macos-latest",  "cross": false, "run_tests": true},
-          {"target": "x86_64-pc-windows-msvc",    "os": "windows-latest", "cross": false, "run_tests": true},
+          {"target": "aarch64-apple-darwin",      "os": "macos-latest",  "cross": false, "run_tests": false},
+          {"target": "x86_64-pc-windows-msvc",    "os": "windows-latest", "cross": false, "run_tests": false},
           {"target": "aarch64-pc-windows-msvc",   "os": "windows-latest", "cross": false, "run_tests": false}
         ]
 ```
