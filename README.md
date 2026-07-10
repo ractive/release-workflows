@@ -370,9 +370,16 @@ every consuming repo's next release.
 ## Linux distro publishing
 
 Two optional, non-blocking jobs (`continue-on-error: true`, same stance as
-`winget`) publish Linux packages beyond the GitHub release assets. Both are
-skipped in `dry-run` and skipped entirely unless their input is set — no
-caller is affected until it opts in.
+`winget`) publish Linux packages beyond the GitHub release assets.
+
+**Both ship disabled by default.** `aur-package` and `cloudsmith-repo` both
+default to `""`, and each job's `if:` condition requires its input to be
+non-empty (`aur`: `inputs.aur-package != ''`; `cloudsmith`: additionally
+`inputs.enable-linux-packages && inputs.cloudsmith-repo != ''`) — so no
+existing caller (hyalo, hoppy, ff-rdp) is affected by this feature landing.
+They also skip in `dry-run` regardless. A repo enables one or both by setting
+the corresponding input once the one-time account/secret setup below is
+done; until then, this section describes capability, not current behavior.
 
 ### AUR (`aur-package`)
 
