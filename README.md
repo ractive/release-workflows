@@ -25,6 +25,7 @@ duplication is intentional; see the comment at the top of each file.
 | --- | --- | --- |
 | `.github/workflows/release.yml` | `workflow_call` | Full release pipeline: version check, security audit, cross-platform build, optional SBOM/attestation/deb/rpm, GitHub release upload, crates.io, Homebrew, Scoop, winget. |
 | `.github/workflows/publish-crates.yml` | `workflow_call` | Standalone crates.io publish loop — the recovery path for when `release.yml`'s `crates-io` job fails after the GitHub release itself has already succeeded. |
+| `.github/workflows/cloudsmith-republish.yml` | `workflow_call` | Standalone Cloudsmith publish — (re)pushes an existing release's `.deb`/`.rpm` assets. For failed cloudsmith jobs or repositories created/renamed after the release ran (release runs pin inputs at tag time). Inputs: `tag`, `cloudsmith-repo`. |
 | `.github/workflows/ci.yml` | `push` to `main`, `pull_request` | Lints this repo's own workflow files with `actionlint` and `zizmor`. |
 | `.github/workflows/selftest.yml` | `push` to `main`, `pull_request` | Calls `release.yml` (from this same repo, at the triggering commit) against the `testdata/fixture-cli` fixture crate in `dry-run` mode — end-to-end validation of the pipeline itself. See [Testing](#testing). |
 
@@ -53,7 +54,7 @@ duplication is intentional; see the comment at the top of each file.
 | `scoop-bucket` | string | `"ractive/scoop-bucket"` | Scoop bucket repository to publish the manifest to. |
 | `aur-package` | string | `""` | AUR package name, e.g. `hyalo-bin`. Empty skips AUR. |
 | `aur-maintainer` | string | `"Jean-Pierre Bergamin <james@ractive.ch>"` | Rendered as the `# Maintainer:` PKGBUILD comment. |
-| `cloudsmith-repo` | string | `""` | Cloudsmith org/repo slug, e.g. `ractive/ractive-pkgs`. Empty skips Cloudsmith. |
+| `cloudsmith-repo` | string | `""` | Cloudsmith org/repo slug, one Cloudsmith repo per project, e.g. `ractive/hoppy`. Empty skips Cloudsmith. |
 | `dry-run` | boolean | `false` | Build, test, package, and upload as workflow artifacts only. Skips tag verification (derives version from `cargo metadata` instead), GitHub release upload, crates.io, Homebrew, Scoop, winget, AUR, and Cloudsmith. |
 
 Default `targets`:
@@ -156,7 +157,7 @@ jobs:
       # AUR and Cloudsmith both require account/repo setup first — see
       # "Linux distro publishing" above. Uncomment once that's done:
       # aur-package: hyalo-bin
-      # cloudsmith-repo: ractive/ractive-pkgs
+      # cloudsmith-repo: ractive/hyalo
 ```
 
 The Homebrew/Scoop description is derived automatically from `hyalo-cli`'s
@@ -220,7 +221,7 @@ jobs:
         This is optional — see `hoppy container logs --help` for tunnel alternatives.
       # Publishes deb/rpm to the hosted apt/yum repos (CLOUDSMITH_API_KEY
       # secret required); see "Linux distro publishing" above:
-      cloudsmith-repo: ractive/ractive-pkgs
+      cloudsmith-repo: ractive/hoppy
       # AUR requires account/SSH-key setup first — uncomment once done:
       # aur-package: hoppy-bin
       # run_tests is false everywhere: hoppy's release pipeline has never run
@@ -443,11 +444,11 @@ Cloudsmith's own documented "Set Me Up" one-liner form, see
 docs for the always-current version):
 ```bash
 # Debian/Ubuntu
-curl -sLf 'https://dl.cloudsmith.io/public/ractive/ractive-pkgs/cfg/setup/bash.deb.sh' | sudo bash
+curl -sLf 'https://dl.cloudsmith.io/public/ractive/<project>/cfg/setup/bash.deb.sh' | sudo bash
 sudo apt install <bin-name>
 
 # Fedora/RHEL/openSUSE (yum/dnf/zypper)
-curl -sLf 'https://dl.cloudsmith.io/public/ractive/ractive-pkgs/cfg/setup/bash.rpm.sh' | sudo bash
+curl -sLf 'https://dl.cloudsmith.io/public/ractive/<project>/cfg/setup/bash.rpm.sh' | sudo bash
 sudo dnf install <bin-name>   # or yum / zypper
 ```
 

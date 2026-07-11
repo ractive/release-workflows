@@ -1,0 +1,74 @@
+# Standalone Cloudsmith publish — the recovery/backfill path when a release's
+# .deb/.rpm need to be (re)pushed outside the main pipeline: a failed
+# cloudsmith job after the release succeeded, or a Cloudsmith repository that
+# was created/renamed after the release ran (release runs pin their inputs at
+# tag time, so re-running the original job would push to the OLD repo slug).
+# Same duplication rationale as publish-crates.yml — see release.yml's header.
+name: Cloudsmith republish (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag whose .deb/.rpm assets to (re)publish, e.g. v0.5.0"
+        required: true
+        type: string
+      cloudsmith-repo:
+        description: "Cloudsmith org/repo slug to push to, e.g. ractive/hoppy"
+        required: true
+        type: string
+
+jobs:
+  republish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Verify CLOUDSMITH_API_KEY is set
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDSMITH_API_KEY}" ]; then
+            echo "ERROR: CLOUDSMITH_API_KEY secret is not set" >&2
+            exit 1
+          fi
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
+      - name: Download deb/rpm packages from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUTS_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${INPUTS_TAG}" \
+            --pattern "*.deb" --pattern "*.rpm" --dir dist
+          ls -la dist
+
+      - name: Push packages to Cloudsmith
+        # any-distro/any-version is Cloudsmith's own documented wildcard
+        # distribution path for both deb and rpm pushes — see
+        # https://docs.cloudsmith.com/formats/debian-repository and
+        # https://docs.cloudsmith.com/formats/redhat-repository.
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          CLOUDSMITH_REPO: ${{ inputs.cloudsmith-repo }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in dist/*.deb; do
+            echo "Pushing $f to ${CLOUDSMITH_REPO}/any-distro/any-version..."
+            uvx --from cloudsmith-cli==1.19.0 cloudsmith push deb "${CLOUDSMITH_REPO}/any-distro/any-version" "$f"
+          done
+          for f in dist/*.rpm; do
+            echo "Pushing $f to ${CLOUDSMITH_REPO}/any-distro/any-version..."
+            uvx --from cloudsmith-cli==1.19.0 cloudsmith push rpm "${CLOUDSMITH_REPO}/any-distro/any-version" "$f"
+          done
