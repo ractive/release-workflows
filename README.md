@@ -154,11 +154,10 @@ jobs:
       version-package: hyalo-cli
       publish-crates: hyalo-core,hyalo-mdlint,hyalo-cli
       winget-identifier: ractive.hyalo
-      # AUR and Cloudsmith need account/repo setup and the
-      # AUR_SSH_PRIVATE_KEY / CLOUDSMITH_API_KEY repo secrets — see
-      # "Linux distro publishing" above:
-      aur-package: hyalo-bin
-      cloudsmith-repo: ractive/hyalo
+      # AUR and Cloudsmith both require account/repo setup first — see
+      # "Linux distro publishing" above. Uncomment once that's done:
+      # aur-package: hyalo-bin
+      # cloudsmith-repo: ractive/hyalo
 ```
 
 The Homebrew/Scoop description is derived automatically from `hyalo-cli`'s
@@ -223,9 +222,8 @@ jobs:
       # Publishes deb/rpm to the hosted apt/yum repos (CLOUDSMITH_API_KEY
       # secret required); see "Linux distro publishing" above:
       cloudsmith-repo: ractive/hoppy
-      # Publishes a -bin PKGBUILD to the AUR (AUR_SSH_PRIVATE_KEY secret
-      # required); see "Linux distro publishing" above:
-      aur-package: hoppy-bin
+      # AUR requires account/SSH-key setup first — uncomment once done:
+      # aur-package: hoppy-bin
       # run_tests is false everywhere: hoppy's release pipeline has never run
       # tests (PR CI covers them, on ubuntu). Its Windows CLI tests overflow
       # the default 1 MB MSVC stack, so enabling them here would break.
@@ -269,11 +267,10 @@ jobs:
       winget-identifier: ractive.ff-rdp
       # ff-rdp ships SBOMs for both published crates, not just the CLI:
       sbom-packages: ff-rdp-cli,ff-rdp-core
-      # Publishes a -bin PKGBUILD to the AUR (AUR_SSH_PRIVATE_KEY secret
-      # required); see "Linux distro publishing" above. The actual caller
-      # also enables Linux packages + Cloudsmith (elided here — see the
-      # hyalo/hoppy examples for that shape):
-      aur-package: ff-rdp-bin
+      # AUR requires account setup first — see "Linux distro publishing"
+      # above. Uncomment once that's done. (No Cloudsmith example here:
+      # ff-rdp doesn't set enable-linux-packages, so there's nothing to push.)
+      # aur-package: ff-rdp-bin
       targets: >-
         [
           {"target": "x86_64-unknown-linux-gnu",   "os": "ubuntu-latest",  "cross": false, "run_tests": true},
