@@ -1238,6 +1238,10 @@ jobs:
           fi
 
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          # uv only runs a tool here; the caller repos have no Python
+          # dependency files, so the cache would never be invalidated.
+          enable-cache: false
 
       - name: Download deb/rpm packages from release
         env:
