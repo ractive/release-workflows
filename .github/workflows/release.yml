@@ -376,6 +376,20 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # A .p12 from Keychain Access holds only the leaf and its key; the
+          # "Developer ID - G2" intermediate that issued it may be missing on
+          # the runner, and codesign then cannot build the chain. Pinned:
+          # SHA-256 of https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          # (CN=Developer ID Certification Authority, OU=G2; expires 2031-09-17).
+          G2_SHA256="f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a"
+          G2_CER="${RUNNER_TEMP}/DeveloperIDG2CA.cer"
+          curl -fsSL --retry 3 -o "$G2_CER" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          if [ "$(shasum -a 256 "$G2_CER" | cut -d ' ' -f 1)" != "$G2_SHA256" ]; then
+            echo "ERROR: DeveloperIDG2CA.cer does not match the pinned SHA-256; Apple may have reissued it, check and update G2_SHA256" >&2
+            exit 1
+          fi
+          security import "$G2_CER" -k "$KEYCHAIN"
+          rm -f "$G2_CER"
           security import "$CERT" -k "$KEYCHAIN" -f pkcs12 \
             -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           rm -f "$CERT"

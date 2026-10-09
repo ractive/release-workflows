@@ -25,6 +25,13 @@ click **+**, choose **Developer ID Application** (G2 Sub-CA), upload the
 request, download the `.cer` and double-click it. It now sits in Keychain
 Access under *My Certificates* as "Developer ID Application: Your Name
 (TEAMID)", with the private key below it.
+If Keychain Access marks it "not trusted", your Mac lacks Apple's
+"Developer ID - G2" intermediate: download
+[DeveloperIDG2CA.cer](https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer)
+from [Apple's certificate authority page](https://www.apple.com/certificateauthority/)
+and double-click it. The workflow installs the same intermediate on the
+runner itself (checked against a pinned SHA-256), because the .p12 does
+not include it.
 
 **Export it as .p12.** In *My Certificates* select that certificate,
 *File > Export Items*, format *Personal Information Exchange (.p12)*, and
@@ -106,7 +113,8 @@ binary stays unsigned.
 On each macOS target, after the build and the `pre-package-command` and
 before archiving:
 
-1. imports the .p12 into a temporary keychain;
+1. imports Apple's Developer ID G2 intermediate (pinned SHA-256) and the
+   .p12 into a temporary keychain;
 2. signs the binary with `codesign --force --options runtime --timestamp`
    (hardened runtime, secure timestamp) and checks it with
    `codesign --verify --strict`;
