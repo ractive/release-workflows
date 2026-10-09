@@ -499,17 +499,17 @@ across a 4-target matrix chosen to cover each distinct code path once:
 | `x86_64-unknown-linux-gnu` | `ubuntu-latest` | Native build + test + SBOM + attestation-eligible path |
 | `x86_64-unknown-linux-musl` | `ubuntu-latest` | `cross`-containerized build (the `Cross.toml`/glibc-cache-poisoning path) |
 | `aarch64-apple-darwin` | `macos-latest` | Native macOS build |
-
-A second job, `macos-unsigned`, unpacks the macOS archive and checks the
-binary carries only the linker's ad-hoc signature: the selftest passes no
-secrets, so this guards the "no Apple secrets, signing skipped" path that
-every release takes until the secrets exist.
 | `x86_64-pc-windows-msvc` | `windows-latest` | Windows `.zip` archive path (`7z`) |
 
 This means every PR to this repo gets real end-to-end validation of build,
 test, archive naming, SBOM generation, deb/rpm packaging, `SHA256SUMS`
 generation, and the dry-run summary — without touching crates.io, any
 Homebrew tap, Scoop bucket, winget fork, or any of the three app repos.
+
+A second job, `macos-unsigned`, unpacks the macOS archive and checks the
+binary carries only the linker's ad-hoc signature: the selftest passes no
+secrets, so this guards the "no Apple secrets, signing skipped" path that
+every release takes until the secrets exist.
 
 ### What's NOT covered by any of the above
 
