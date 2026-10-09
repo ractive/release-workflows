@@ -56,6 +56,7 @@ duplication is intentional; see the comment at the top of each file.
 | `aur-maintainer` | string | `"Jean-Pierre Bergamin <james@ractive.ch>"` | Rendered as the `# Maintainer:` PKGBUILD comment. |
 | `cloudsmith-repo` | string | `""` | Cloudsmith org/repo slug, one Cloudsmith repo per project, e.g. `ractive/hoppy`. Empty skips Cloudsmith. |
 | `dry-run` | boolean | `false` | Build, test, package, and upload as workflow artifacts only. Skips tag verification (derives version from `cargo metadata` instead), GitHub release upload, crates.io, Homebrew, Scoop, winget, AUR, and Cloudsmith. |
+| `macos-sign-dry-run` | boolean | `false` | Sign and notarise the macOS binaries in a `dry-run` too, when the Apple secrets exist. Off by default; see [docs/macos-signing.md](docs/macos-signing.md#testing-the-setup-with-a-dry-run). |
 
 Default `targets`:
 
@@ -509,7 +510,8 @@ Homebrew tap, Scoop bucket, winget fork, or any of the three app repos.
 A second job, `macos-unsigned`, unpacks the macOS archive and checks the
 binary carries only the linker's ad-hoc signature: the selftest passes no
 secrets, so this guards the "no Apple secrets, signing skipped" path that
-every release takes until the secrets exist.
+every release takes until the secrets exist (and every dry run without
+`macos-sign-dry-run`).
 
 ### What's NOT covered by any of the above
 

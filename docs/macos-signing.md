@@ -77,6 +77,30 @@ repo's `.github/workflows/release.yml` bumps its `uses:` line to that tag.
 Nothing else changes. Repos still on an older tag keep shipping unsigned
 binaries even with the secrets set.
 
+## Testing the setup with a dry run
+
+Dry runs do not sign. In every caller (saturnus, hyalo, hoppy, ff-rdp,
+hptx) `dry-run` is `github.event_name == 'workflow_dispatch'`: a run
+started by hand from the Actions tab, on any branch. Such a run executes
+that branch's `build.rs` and `pre-package-command` before the signing
+steps, unreviewed, on the runner that would hold the Developer ID key, and
+each signed run spends a notarisation. So a dry run gets the secrets only
+when the caller sets `macos-sign-dry-run: true`. No caller runs release.yml
+on `pull_request` or `push`.
+
+To test the secrets once before the first signed release, from `main`:
+
+1. In the caller's `release.yml`, next to `dry-run:`, add
+   `macos-sign-dry-run: true`, on a branch.
+2. Merge it, then run the workflow by hand on `main`
+   (`gh workflow run release.yml --ref main`).
+3. Check the macOS build job: "Sign the binary" and "Notarise the binary"
+   should succeed and the notarisation status should be Accepted.
+4. Remove the line again.
+
+The selftest in this repo passes no secrets and checks that its macOS
+binary stays unsigned.
+
 ## What a release then does
 
 On each macOS target, after the build and the `pre-package-command` and
@@ -96,7 +120,8 @@ The archive, its SBOM and attestation, `SHA256SUMS` and the Homebrew
 checksum are all made after this, so they describe the signed binary.
 
 If `APPLE_CERTIFICATE` is set but any of the other five is missing, the
-build fails rather than ship a signed but unnotarised binary.
+build fails rather than ship a signed but unnotarised binary. A dry run
+without `macos-sign-dry-run` skips this check along with the signing.
 
 ## Limits
 
@@ -106,10 +131,6 @@ build fails rather than ship a signed but unnotarised binary.
 - **Only quarantined files are checked.** A browser download is
   quarantined; `curl`, `tar` and Homebrew formulae are not, so for them
   signing mostly changes nothing visible.
-- **Dry runs sign too.** A `dry-run: true` call in a repo with the
-  secrets signs and notarises like a release (a useful test of the setup,
-  a few minutes slower). The selftest in this repo passes no secrets and
-  checks that its macOS binary stays unsigned.
 - **`spctl` is informational.** Apple's Gatekeeper tools are meant for
   apps, installers and disk images; the workflow logs `spctl`'s verdict on
   the binary but relies on notarytool's "Accepted".

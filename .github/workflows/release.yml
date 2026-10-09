@@ -131,6 +131,11 @@ on:
         required: false
         type: string
         default: ""
+      macos-sign-dry-run:
+        description: "Sign and notarise the macOS binaries in a dry run too, when the Apple secrets exist. Off by default: a dry run builds an unreviewed ref, which should not get the signing key (docs/macos-signing.md)."
+        required: false
+        type: boolean
+        default: false
       dry-run:
         description: "Build, test, package and upload as workflow artifacts only. Skips tag verification, GitHub release upload, crates.io, Homebrew, Scoop, winget and attestation."
         required: false
@@ -249,9 +254,12 @@ jobs:
     # (docs/macos-signing.md). `secrets` cannot appear in a step's `if:`,
     # so this flag carries "APPLE_CERTIFICATE is set" to the steps. Without
     # the secret it is 'false', every signing step skips, and the archive is
-    # built exactly as before.
+    # built exactly as before. A dry run builds whatever ref was dispatched,
+    # whose build.rs and pre-package command nobody has reviewed yet, so it
+    # gets the signing key only when the caller asks (macos-sign-dry-run).
+    # The half-configured check sits in the import step, behind this flag.
     env:
-      MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
+      MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && (!inputs.dry-run || inputs.macos-sign-dry-run) }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
