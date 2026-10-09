@@ -465,6 +465,14 @@ jobs:
           echo "$RESULT"
           STATUS=$(jq -r '.status // empty' <<< "$RESULT" 2> /dev/null || true)
           ID=$(jq -r '.id // empty' <<< "$RESULT" 2> /dev/null || true)
+          MESSAGE=$(jq -r '.message // empty' <<< "$RESULT" 2> /dev/null || true)
+          echo "Notarisation submission id: ${ID:-none}"
+          # --wait gave up, Apple did not: a new team's first submissions can
+          # take hours, later ones minutes.
+          if [ -z "$STATUS" ] && [ -n "$ID" ] && [[ "$MESSAGE" == *Timeout* ]]; then
+            echo "ERROR: Apple has not finished checking submission ${ID} after 30 min; it goes on at Apple. Check with \`xcrun notarytool info ${ID} --key AuthKey_<key id>.p8 --key-id <key id> --issuer <issuer id>\` and rerun the job when it is Accepted." >&2
+            exit 1
+          fi
           if [ "$STATUS" != "Accepted" ]; then
             echo "ERROR: notarisation ended with status '${STATUS:-none}'" >&2
             if [ -n "$ID" ]; then
