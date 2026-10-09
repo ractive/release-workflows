@@ -638,9 +638,13 @@ jobs:
   # ---------------------------------------------------------------------
   # 7. crates.io (conditional, skipped in dry-run)
   # ---------------------------------------------------------------------
+  # Every post-release job guards with `always() && needs.release.result ==
+  # 'success'`: `release` needs `linux-packages`, which is skipped when
+  # deb/rpm are off, and a skipped ancestor would otherwise skip these jobs
+  # too, although `release` itself ran (its own `if` uses always()).
   crates-io:
     needs: release
-    if: inputs.publish-crates != '' && !inputs.dry-run
+    if: always() && needs.release.result == 'success' && inputs.publish-crates != '' && !inputs.dry-run
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -723,7 +727,7 @@ jobs:
   # ---------------------------------------------------------------------
   homebrew:
     needs: [release, version-check]
-    if: '!inputs.dry-run'
+    if: always() && needs.release.result == 'success' && !inputs.dry-run
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -880,7 +884,7 @@ jobs:
   # ---------------------------------------------------------------------
   scoop:
     needs: [release, version-check]
-    if: '!inputs.dry-run'
+    if: always() && needs.release.result == 'success' && !inputs.dry-run
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1012,7 +1016,7 @@ jobs:
   # ---------------------------------------------------------------------
   winget:
     needs: release
-    if: inputs.winget-identifier != '' && !inputs.dry-run
+    if: always() && needs.release.result == 'success' && inputs.winget-identifier != '' && !inputs.dry-run
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1050,7 +1054,7 @@ jobs:
   # ---------------------------------------------------------------------
   aur:
     needs: [release, version-check]
-    if: inputs.aur-package != '' && !inputs.dry-run
+    if: always() && needs.release.result == 'success' && inputs.aur-package != '' && !inputs.dry-run
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1214,7 +1218,7 @@ jobs:
   # ---------------------------------------------------------------------
   cloudsmith:
     needs: release
-    if: inputs.enable-linux-packages && inputs.cloudsmith-repo != '' && !inputs.dry-run
+    if: always() && needs.release.result == 'success' && inputs.enable-linux-packages && inputs.cloudsmith-repo != '' && !inputs.dry-run
     runs-on: ubuntu-latest
     permissions:
       contents: read
