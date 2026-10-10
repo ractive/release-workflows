@@ -131,6 +131,11 @@ on:
         required: false
         type: string
         default: ""
+      macos-sign-dry-run:
+        description: "Sign and notarise the macOS binaries in a dry run too, when the Apple secrets exist. Off by default: a dry run builds an unreviewed ref, which should not get the signing key (docs/macos-signing.md)."
+        required: false
+        type: boolean
+        default: false
       dry-run:
         description: "Build, test, package and upload as workflow artifacts only. Skips tag verification, GitHub release upload, crates.io, Homebrew, Scoop, winget and attestation."
         required: false
@@ -245,6 +250,17 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
+    # Optional Developer ID signing and notarisation of the macOS binary
+    # (docs/macos-signing.md). `secrets` cannot appear in a step's `if:`,
+    # so this flag carries "APPLE_CERTIFICATE is set" to the steps. Without
+    # the secret it is 'false', every signing step skips, and the archive is
+    # built exactly as before. A dry run builds whatever ref was dispatched,
+    # whose build.rs and pre-package command nobody has reviewed yet, so it
+    # gets the signing key only when the caller asks (macos-sign-dry-run).
+    # The half-configured check sits in the import step, behind this flag.
+    env:
+      MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && (!inputs.dry-run || inputs.macos-sign-dry-run) }}
+
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -323,6 +339,159 @@ jobs:
           [ -f "${BIN_PATH}.exe" ] && BIN_PATH="${BIN_PATH}.exe"
           export BIN_PATH
           eval "$INPUTS_PRE_PACKAGE_COMMAND"
+
+      # --- macOS signing (only with APPLE_CERTIFICATE; docs/macos-signing.md).
+      # It runs after the pre-package command and before packaging, so the
+      # archive, its SBOM and attestation, SHA256SUMS and the Homebrew
+      # checksum all describe the signed binary. Notarising does not change
+      # the binary: a bare Mach-O cannot carry a stapled ticket, so
+      # Gatekeeper looks the ticket up online on first launch.
+      - name: Import the Developer ID certificate (macOS)
+        if: env.MACOS_SIGNING == 'true' && runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          # A half-configured repo fails here rather than shipping a signed
+          # but unnotarised binary.
+          for name in APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                      APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_API_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "ERROR: APPLE_CERTIFICATE is set but $name is not (docs/macos-signing.md)" >&2
+              exit 1
+            fi
+          done
+          umask 077
+          KEYCHAIN="${RUNNER_TEMP}/macos-signing.keychain-db"
+          CERT="${RUNNER_TEMP}/macos-signing.p12"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 24)
+          echo "::add-mask::${KEYCHAIN_PASSWORD}"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERT"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # A .p12 from Keychain Access holds only the leaf and its key; the
+          # "Developer ID - G2" intermediate that issued it may be missing on
+          # the runner, and codesign then cannot build the chain. Pinned:
+          # SHA-256 of https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          # (CN=Developer ID Certification Authority, OU=G2; expires 2031-09-17).
+          G2_SHA256="f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a"
+          G2_CER="${RUNNER_TEMP}/DeveloperIDG2CA.cer"
+          curl -fsSL --retry 3 -o "$G2_CER" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          if [ "$(shasum -a 256 "$G2_CER" | cut -d ' ' -f 1)" != "$G2_SHA256" ]; then
+            echo "ERROR: DeveloperIDG2CA.cer does not match the pinned SHA-256; Apple may have reissued it, check and update G2_SHA256" >&2
+            exit 1
+          fi
+          security import "$G2_CER" -k "$KEYCHAIN"
+          rm -f "$G2_CER"
+          security import "$CERT" -k "$KEYCHAIN" -f pkcs12 \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$CERT"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          # On the search list so codesign finds the certificate chain.
+          security list-keychains -d user -s "$KEYCHAIN" \
+            "${HOME}/Library/Keychains/login.keychain-db"
+          if ! security find-identity -v -p codesigning "$KEYCHAIN" \
+               | grep -qF -- "$APPLE_SIGNING_IDENTITY"; then
+            echo "ERROR: APPLE_SIGNING_IDENTITY is not a valid signing identity in the imported certificate" >&2
+            exit 1
+          fi
+          echo "MACOS_KEYCHAIN=${KEYCHAIN}" >> "$GITHUB_ENV"
+
+      - name: Sign the binary (macOS)
+        if: env.MACOS_SIGNING == 'true' && runner.os == 'macOS'
+        shell: bash
+        working-directory: ${{ inputs.workspace-dir }}
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TARGET: ${{ matrix.target }}
+          BIN_NAME: ${{ inputs.bin-name }}
+          RUN_TESTS: ${{ matrix.run_tests }}
+        run: |
+          set -euo pipefail
+          BIN="target/${TARGET}/release/${BIN_NAME}"
+          # Hardened runtime and a secure timestamp: both are required for
+          # notarisation.
+          codesign --force --options runtime --timestamp \
+            --keychain "$MACOS_KEYCHAIN" --sign "$APPLE_SIGNING_IDENTITY" "$BIN"
+          codesign --verify --strict --verbose=2 "$BIN"
+          DISPLAY_TXT="${RUNNER_TEMP}/codesign-display.txt"
+          codesign --display --verbose=2 "$BIN" 2>&1 | tee "$DISPLAY_TXT"
+          grep -q '(runtime)' "$DISPLAY_TXT"
+          grep -q '^Timestamp=' "$DISPLAY_TXT"
+          # The hardened runtime must not stop the binary from starting.
+          if [ "$RUN_TESTS" = "true" ]; then
+            "$BIN" --help > /dev/null
+          fi
+
+      - name: Notarise the binary (macOS)
+        if: env.MACOS_SIGNING == 'true' && runner.os == 'macOS'
+        shell: bash
+        working-directory: ${{ inputs.workspace-dir }}
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          TARGET: ${{ matrix.target }}
+          BIN_NAME: ${{ inputs.bin-name }}
+        run: |
+          set -euo pipefail
+          umask 077
+          BIN="target/${TARGET}/release/${BIN_NAME}"
+          KEY="${RUNNER_TEMP}/macos-notary-key.p8"
+          ZIP="${RUNNER_TEMP}/${BIN_NAME}-${TARGET}-notarise.zip"
+          # APPLE_API_KEY is the base64 of the .p8 file; the raw PEM text
+          # is accepted too.
+          case "$APPLE_API_KEY" in
+            -----BEGIN*) printf '%s\n' "$APPLE_API_KEY" > "$KEY" ;;
+            *) printf '%s' "$APPLE_API_KEY" | base64 --decode > "$KEY" ;;
+          esac
+          # notarytool takes a zip, not a bare binary; the zip is only the
+          # submission, the archive below still holds the binary itself.
+          ditto -c -k --keepParent "$BIN" "$ZIP"
+          notary() {
+            xcrun notarytool "$@" --key "$KEY" --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER"
+          }
+          RESULT=$(notary submit "$ZIP" --wait --timeout 30m --output-format json) || true
+          rm -f "$ZIP"
+          echo "$RESULT"
+          STATUS=$(jq -r '.status // empty' <<< "$RESULT" 2> /dev/null || true)
+          ID=$(jq -r '.id // empty' <<< "$RESULT" 2> /dev/null || true)
+          MESSAGE=$(jq -r '.message // empty' <<< "$RESULT" 2> /dev/null || true)
+          echo "Notarisation submission id: ${ID:-none}"
+          # --wait gave up, Apple did not: a new team's first submissions can
+          # take hours, later ones minutes.
+          if [ -z "$STATUS" ] && [ -n "$ID" ] && [[ "$MESSAGE" == *Timeout* ]]; then
+            echo "ERROR: Apple has not finished checking submission ${ID} after 30 min; it goes on at Apple. Check with \`xcrun notarytool info ${ID} --key AuthKey_<key id>.p8 --key-id <key id> --issuer <issuer id>\` and rerun the job when it is Accepted." >&2
+            exit 1
+          fi
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "ERROR: notarisation ended with status '${STATUS:-none}'" >&2
+            if [ -n "$ID" ]; then
+              notary log "$ID" || true
+            fi
+            exit 1
+          fi
+          # Informational: asks Gatekeeper, online, for the ticket. Apple
+          # documents spctl/syspolicy_check for bundles, so a bare binary's
+          # verdict is logged, not enforced.
+          spctl --assess --type open --context context:primary-signature -vv "$BIN" \
+            || echo "::warning::spctl could not confirm the notarisation ticket yet"
+
+      - name: Remove the signing keychain and key (macOS)
+        if: always() && env.MACOS_SIGNING == 'true' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          security delete-keychain "${RUNNER_TEMP}/macos-signing.keychain-db" 2> /dev/null || true
+          rm -f "${RUNNER_TEMP}/macos-signing.p12" "${RUNNER_TEMP}/macos-notary-key.p8"
 
       - name: Determine archive name
         shell: bash

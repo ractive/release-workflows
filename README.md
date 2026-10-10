@@ -23,7 +23,7 @@ duplication is intentional; see the comment at the top of each file.
 
 | File | Trigger | Purpose |
 | --- | --- | --- |
-| `.github/workflows/release.yml` | `workflow_call` | Full release pipeline: version check, security audit, cross-platform build, optional SBOM/attestation/deb/rpm, GitHub release upload, crates.io, Homebrew, Scoop, winget. |
+| `.github/workflows/release.yml` | `workflow_call` | Full release pipeline: version check, security audit, cross-platform build, optional macOS signing and notarisation, optional SBOM/attestation/deb/rpm, GitHub release upload, crates.io, Homebrew, Scoop, winget. |
 | `.github/workflows/publish-crates.yml` | `workflow_call` | Standalone crates.io publish loop — the recovery path for when `release.yml`'s `crates-io` job fails after the GitHub release itself has already succeeded. |
 | `.github/workflows/cloudsmith-republish.yml` | `workflow_call` | Standalone Cloudsmith publish — (re)pushes an existing release's `.deb`/`.rpm` assets. For failed cloudsmith jobs or repositories created/renamed after the release ran (release runs pin inputs at tag time). Inputs: `tag`, `cloudsmith-repo`. |
 | `.github/workflows/ci.yml` | `push` to `main`, `pull_request` | Lints this repo's own workflow files with `actionlint` and `zizmor`. |
@@ -56,6 +56,7 @@ duplication is intentional; see the comment at the top of each file.
 | `aur-maintainer` | string | `"Jean-Pierre Bergamin <james@ractive.ch>"` | Rendered as the `# Maintainer:` PKGBUILD comment. |
 | `cloudsmith-repo` | string | `""` | Cloudsmith org/repo slug, one Cloudsmith repo per project, e.g. `ractive/hoppy`. Empty skips Cloudsmith. |
 | `dry-run` | boolean | `false` | Build, test, package, and upload as workflow artifacts only. Skips tag verification (derives version from `cargo metadata` instead), GitHub release upload, crates.io, Homebrew, Scoop, winget, AUR, and Cloudsmith. |
+| `macos-sign-dry-run` | boolean | `false` | Sign and notarise the macOS binaries in a `dry-run` too, when the Apple secrets exist. Off by default; see [docs/macos-signing.md](docs/macos-signing.md#testing-the-setup-with-a-dry-run). |
 
 Default `targets`:
 
@@ -98,6 +99,7 @@ the secret for a feature that's actually enabled:
 | `WINGET_TOKEN` | `winget-identifier` is non-empty | `release.yml` (`winget` job) |
 | `AUR_SSH_PRIVATE_KEY` | `aur-package` is non-empty | `release.yml` (`aur` job) |
 | `CLOUDSMITH_API_KEY` | `cloudsmith-repo` is non-empty | `release.yml` (`cloudsmith` job) |
+| `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, `APPLE_API_KEY` | optional; with `APPLE_CERTIFICATE` set, all six | `release.yml` (`build` job, macOS targets): Developer ID signing and notarisation. Absent: the steps skip. See [docs/macos-signing.md](docs/macos-signing.md); [`scripts/set-apple-secrets.sh`](scripts/set-apple-secrets.sh) sets them. |
 
 `GH_TOKEN`/`github.token` (the automatic `GITHUB_TOKEN`) is used for release
 asset upload/download and needs no configuration beyond the permissions
@@ -504,6 +506,12 @@ This means every PR to this repo gets real end-to-end validation of build,
 test, archive naming, SBOM generation, deb/rpm packaging, `SHA256SUMS`
 generation, and the dry-run summary — without touching crates.io, any
 Homebrew tap, Scoop bucket, winget fork, or any of the three app repos.
+
+A second job, `macos-unsigned`, unpacks the macOS archive and checks the
+binary carries only the linker's ad-hoc signature: the selftest passes no
+secrets, so this guards the "no Apple secrets, signing skipped" path that
+every release takes until the secrets exist (and every dry run without
+`macos-sign-dry-run`).
 
 ### What's NOT covered by any of the above
 
