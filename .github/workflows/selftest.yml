@@ -5,6 +5,14 @@
 # the real build/test/archive/SBOM/deb-rpm/SHA256SUMS/dry-run-summary code
 # paths on every PR without touching crates.io, Homebrew, Scoop, winget, or
 # any app repo.
+#
+# Two callers run in one workflow run, as in a repository that releases two
+# binaries: `selftest-two` (bin-name fixture-cli-two, its own checksums file)
+# and then `selftest` (bin-name fixture-cli, a prefix of the other's). The
+# order is deliberate: when `selftest` collects its artifacts, the other
+# caller's are already in the run and match `fixture-cli-*`, so its filter
+# has something to drop. `two-callers` checks that each bundle holds only
+# its own files and checksums.
 name: Selftest
 
 on:
@@ -26,7 +34,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The second caller: Linux only, no deb/rpm, its own checksums file.
+  selftest-two:
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+    with:
+      bin-name: fixture-cli-two
+      version-package: fixture-cli
+      workspace-dir: testdata/fixture-cli
+      checksums-file: SHA256SUMS-fixture-cli-two
+      dry-run: true
+      enable-sbom: true
+      enable-attestation: false
+      targets: >-
+        [
+          {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-latest", "cross": false, "run_tests": true}
+        ]
+
   selftest:
+    needs: selftest-two
     uses: ./.github/workflows/release.yml
     permissions:
       contents: write
@@ -90,3 +117,43 @@ jobs:
             echo "ERROR: the binary is signed with a certificate although no Apple secrets were passed" >&2
             exit 1
           fi
+
+  # Each caller's dry-run bundle has its own name, only its own files and
+  # its own checksums file, which covers exactly those files.
+  two-callers:
+    needs: [selftest, selftest-two]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download both bundles
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: dry-run-bundle-*
+          path: bundles
+
+      - name: Check each bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          check() {
+            local bin="$1" sums="$2" other_sums="$3" dir="bundles/dry-run-bundle-$1"
+            echo "== $dir"
+            ls -1 "$dir"
+            [ -f "$dir/$sums" ] || { echo "ERROR: $dir has no $sums" >&2; exit 1; }
+            [ ! -e "$dir/$other_sums" ] || { echo "ERROR: $dir has $other_sums" >&2; exit 1; }
+            for f in "$dir"/*; do
+              f=$(basename "$f")
+              case "$f" in
+                "$sums"|"${bin}-v0.0.1-"*) ;;
+                *) echo "ERROR: $dir holds $f, not $bin's" >&2; exit 1 ;;
+              esac
+            done
+            # Every file but the checksums file is listed, and nothing else.
+            listed=$(awk '{print $2}' "$dir/$sums" | sort)
+            present=$(for f in "$dir"/*; do f=$(basename "$f"); [ "$f" = "$sums" ] || echo "$f"; done | sort)
+            [ "$listed" = "$present" ] || { echo "ERROR: $sums does not list exactly the bundle's files" >&2; exit 1; }
+            (cd "$dir" && sha256sum -c "$sums")
+          }
+          check fixture-cli SHA256SUMS SHA256SUMS-fixture-cli-two
+          check fixture-cli-two SHA256SUMS-fixture-cli-two SHA256SUMS

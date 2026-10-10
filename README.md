@@ -55,6 +55,7 @@ duplication is intentional; see the comment at the top of each file.
 | `aur-package` | string | `""` | AUR package name, e.g. `hyalo-bin`. Empty skips AUR. |
 | `aur-maintainer` | string | `"Jean-Pierre Bergamin <james@ractive.ch>"` | Rendered as the `# Maintainer:` PKGBUILD comment. |
 | `cloudsmith-repo` | string | `""` | Cloudsmith org/repo slug, one Cloudsmith repo per project, e.g. `ractive/hoppy`. Empty skips Cloudsmith. |
+| `checksums-file` | string | `"SHA256SUMS"` | Name of the checksums file uploaded to the release (and put in the dry-run bundle); the `homebrew`, `scoop` and `aur` jobs read it, and the Scoop manifest's `autoupdate` hash URL points at it. Letters, digits, `.`, `_` and `-` only. Only a repository with [two callers](#two-callers-in-one-repository) needs to change it. |
 | `dry-run` | boolean | `false` | Build, test, package, and upload as workflow artifacts only. Skips tag verification (derives version from `cargo metadata` instead), GitHub release upload, crates.io, Homebrew, Scoop, winget, AUR, and Cloudsmith. |
 | `macos-sign-dry-run` | boolean | `false` | Sign and notarise the macOS binaries in a `dry-run` too, when the Apple secrets exist. Off by default; see [docs/macos-signing.md](docs/macos-signing.md#testing-the-setup-with-a-dry-run). |
 
@@ -304,9 +305,54 @@ jobs:
 ```
 
 Trigger it manually from the Actions tab. It builds, tests, packages, and
-generates `SHA256SUMS`, then uploads everything as one `dry-run-bundle`
-workflow artifact and prints a file/size table to the job summary — nothing
-is published anywhere.
+generates `SHA256SUMS` (the `checksums-file`), then uploads everything as one
+`dry-run-bundle-<bin-name>` workflow artifact (`dry-run-bundle` before
+v0.3.0) and prints a file/size table to the job summary — nothing is
+published anywhere.
+
+### Two callers in one repository
+
+A repository that ships two binaries can call `release.yml` twice from one
+release workflow, one job per `bin-name`. Since v0.3.0 the two do not
+collide:
+
+- the `release` and `dry-run-summary` jobs take only their own artifacts:
+  the download is filtered by `<bin-name>-*`, and then every file not named
+  `<bin-name>-v<version>-…` is dropped (so `foo` does not take `foo-bar`'s);
+- each gives its own `checksums-file`, e.g. `SHA256SUMS` and
+  `SHA256SUMS-foo-bar`, so both can be uploaded to the same release and
+  each package-manager job reads its own;
+- the dry-run bundles are `dry-run-bundle-<bin-name>`;
+- the Homebrew tap and Scoop bucket pushes rebase onto a concurrent push
+  (`git pull --rebase`) and try again, 5 pushes in all;
+- the `cloudsmith` job pushes only its own `<bin-name>-v<version>-*` .deb
+  and .rpm from the release, not the other caller's (which may still be
+  uploading).
+
+Both callers run on the same release, and `version-check` compares the tag
+with each caller's own `version-package`: **both version-packages must carry
+the tag's version**, e.g. one workspace version that every crate inherits.
+
+```yaml
+jobs:
+  release:
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.0
+    secrets: inherit
+    with:
+      bin-name: foo
+      version-package: foo-cli
+  release-bar:
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.0
+    secrets: inherit
+    with:
+      bin-name: foo-bar
+      version-package: foo-bar-cli
+      checksums-file: SHA256SUMS-foo-bar
+```
+
+Give `publish-crates` to one of them only (or list each caller's own crates
+in it). Cloudsmith can be on both, with one `cloudsmith-repo` each or the
+same one. winget has no such provisions: enable it on one caller.
 
 ### Recovery: standalone crates.io publish
 
@@ -493,7 +539,8 @@ and resolves at the triggering commit's SHA) against
 [`testdata/fixture-cli`](testdata/fixture-cli), a minimal, dependency-free
 Cargo workspace built specifically to exercise this pipeline. It runs with
 `dry-run: true`, `enable-sbom: true`, and `enable-linux-packages: true`
-across a 4-target matrix chosen to cover each distinct code path once:
+across a 4-target matrix chosen to cover each distinct code path once
+(the job `selftest`):
 
 | Target | OS | Path exercised |
 | --- | --- | --- |
@@ -507,7 +554,15 @@ test, archive naming, SBOM generation, deb/rpm packaging, `SHA256SUMS`
 generation, and the dry-run summary — without touching crates.io, any
 Homebrew tap, Scoop bucket, winget fork, or any of the three app repos.
 
-A second job, `macos-unsigned`, unpacks the macOS archive and checks the
+A second caller, `selftest-two`, runs first in the same workflow run with
+`bin-name: fixture-cli-two` (a second binary of the fixture crate; `fixture-cli`
+is a prefix of its name), Linux only and `checksums-file:
+SHA256SUMS-fixture-cli-two`. So when `selftest` collects its artifacts, the
+other caller's are already in the run and match `fixture-cli-*`. The job
+`two-callers` then checks that each `dry-run-bundle-<bin-name>` holds only
+its own files and its own checksums file, which lists exactly them.
+
+The job `macos-unsigned` unpacks the macOS archive and checks the
 binary carries only the linker's ad-hoc signature: the selftest passes no
 secrets, so this guards the "no Apple secrets, signing skipped" path that
 every release takes until the secrets exist (and every dry run without
@@ -526,5 +581,6 @@ before cutting a tag to catch build/packaging problems without touching any
 publish destination — but it still can't validate the publish steps
 themselves. There is currently no automated test of the publish jobs; they
 rely on the retry/idempotency logic (documented inline in `release.yml` and
-`publish-crates.yml`) and on the "already uploaded/exists" and
+`publish-crates.yml`: index lag, crates.io's 429 for too many new crates,
+which waits 600 s up to 6 times, and the tap/bucket push retry) and on the "already uploaded/exists" and
 "unchanged, skipping commit" guards behaving correctly in production.
