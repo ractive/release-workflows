@@ -2,9 +2,9 @@
 //!
 //! Exercises the reusable release pipeline (build, test, package, archive)
 //! without pulling in any dependencies, so CI runs stay fast. Two binaries
-//! share this code: `fixture-cli` and `fixture-cli-two`, so the selftest can
-//! run two callers of release.yml in one run, one bin-name the prefix of the
-//! other.
+//! share this code: `fixture-cli` and `fixture-cli-two` (the package of that
+//! name in crates/two-cli), so the selftest can run two callers of
+//! release.yml in one run, one bin-name the prefix of the other.
 
 /// The reply to `args` for the binary called `name`.
 pub fn run(name: &str, args: &[String]) -> String {

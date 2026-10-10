@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "fixture-cli"
 version = "0.0.1"
+
+[[package]]
+name = "fixture-cli-two"
+version = "0.0.1"
+dependencies = [
+ "fixture-cli",
+]

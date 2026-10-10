@@ -7,8 +7,9 @@
 # any app repo.
 #
 # Two callers run in one workflow run, as in a repository that releases two
-# binaries: `selftest-two` (bin-name fixture-cli-two, its own checksums file)
-# and then `selftest` (bin-name fixture-cli, a prefix of the other's). The
+# binaries: `selftest-two` (bin-name fixture-cli-two, its own checksums file,
+# its package in crates/two-cli, a directory not named after it) and then
+# `selftest` (bin-name fixture-cli, a prefix of the other's). The
 # order is deliberate: when `selftest` collects its artifacts, the other
 # caller's are already in the run and match `fixture-cli-*`, so its filter
 # has something to drop. `two-callers` checks that each bundle holds only
@@ -34,14 +35,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The second caller: Linux only, no deb/rpm, its own checksums file.
+  # The second caller: Linux only, no deb/rpm, its own checksums file. Its
+  # package `fixture-cli-two` lives in crates/two-cli, so its SBOM is found
+  # by the package's manifest directory, not by its name (a missing SBOM
+  # fails the build job).
   selftest-two:
     uses: ./.github/workflows/release.yml
     permissions:
       contents: write
     with:
       bin-name: fixture-cli-two
-      version-package: fixture-cli
+      version-package: fixture-cli-two
       workspace-dir: testdata/fixture-cli
       checksums-file: SHA256SUMS-fixture-cli-two
       dry-run: true
@@ -119,7 +123,8 @@ jobs:
           fi
 
   # Each caller's dry-run bundle has its own name, only its own files and
-  # its own checksums file, which covers exactly those files.
+  # its own checksums file, which covers exactly those files, and the SBOM
+  # of each native target.
   two-callers:
     needs: [selftest, selftest-two]
     runs-on: ubuntu-latest
@@ -155,5 +160,16 @@ jobs:
             [ "$listed" = "$present" ] || { echo "ERROR: $sums does not list exactly the bundle's files" >&2; exit 1; }
             (cd "$dir" && sha256sum -c "$sums")
           }
+          sboms() {
+            local bin="$1"; shift
+            for target in "$@"; do
+              f="bundles/dry-run-bundle-${bin}/${bin}-v0.0.1-${target}.cdx.json"
+              [ -s "$f" ] || { echo "ERROR: no SBOM $f" >&2; exit 1; }
+              jq -e '.bomFormat == "CycloneDX"' "$f" > /dev/null || { echo "ERROR: $f is not a CycloneDX SBOM" >&2; exit 1; }
+            done
+          }
           check fixture-cli SHA256SUMS SHA256SUMS-fixture-cli-two
           check fixture-cli-two SHA256SUMS-fixture-cli-two SHA256SUMS
+          # Native targets only: cross builds have no SBOM.
+          sboms fixture-cli x86_64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc
+          sboms fixture-cli-two x86_64-unknown-linux-gnu
