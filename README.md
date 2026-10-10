@@ -324,7 +324,14 @@ collide:
   each package-manager job reads its own;
 - the dry-run bundles are `dry-run-bundle-<bin-name>`;
 - the Homebrew tap and Scoop bucket pushes rebase onto a concurrent push
-  (`git pull --rebase`) and try again, 5 pushes in all.
+  (`git pull --rebase`) and try again, 5 pushes in all;
+- the `cloudsmith` job pushes only its own `<bin-name>-v<version>-*` .deb
+  and .rpm from the release, not the other caller's (which may still be
+  uploading).
+
+Both callers run on the same release, and `version-check` compares the tag
+with each caller's own `version-package`: **both version-packages must carry
+the tag's version**, e.g. one workspace version that every crate inherits.
 
 ```yaml
 jobs:
@@ -344,8 +351,8 @@ jobs:
 ```
 
 Give `publish-crates` to one of them only (or list each caller's own crates
-in it). winget and Cloudsmith have no such provisions: enable them on one
-caller.
+in it). Cloudsmith can be on both, with one `cloudsmith-repo` each or the
+same one. winget has no such provisions: enable it on one caller.
 
 ### Recovery: standalone crates.io publish
 
