@@ -1,0 +1,19 @@
+# The selftest's second caller. Its directory is not named after the package
+# (crates/two-cli holds `fixture-cli-two`), as in a repository whose
+# crates/foo-cli holds the package `foo`, so the SBOM has to be found by
+# the package's manifest directory, not by its name.
+[package]
+name = "fixture-cli-two"
+description = "Second test fixture binary for release-workflows selftest.yml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "fixture-cli-two"
+path = "src/main.rs"
+
+[dependencies]
+fixture-cli = { path = "../fixture-cli" }

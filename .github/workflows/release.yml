@@ -574,18 +574,40 @@ jobs:
           set -euo pipefail
           cargo cyclonedx --format json --target ${{ matrix.target }}
           # cargo-cyclonedx writes one SBOM per package next to its
-          # Cargo.toml; collect them so the requested ones can travel
-          # alongside the archive.
-          mkdir -p sbom
-          find . -path './target' -prune -o -name '*.cdx.json' -print | while read -r f; do
-            cp "$f" "sbom/$(basename "$(dirname "$f")")-${{ matrix.target }}.cdx.json"
-          done
-          ls -la sbom
+          # Cargo.toml. A package's directory need not carry its name
+          # (crates/foo-cli holding the package `foo`), so each requested
+          # package is looked up by name in cargo metadata and its SBOM taken
+          # from its manifest's directory, relative to the workspace root
+          # (backslashes on Windows turned into slashes). A requested SBOM
+          # that is missing fails the job: SBOMs are on, so a release without
+          # one is a broken release, not a warning.
+          META=$(cargo metadata --no-deps --format-version 1)
           IFS=',' read -ra pkgs <<< "${SBOM_PACKAGES:-$BIN_VERSION_PACKAGE}"
           for pkg in "${pkgs[@]}"; do
             pkg="$(echo "$pkg" | xargs)"
             [ -z "$pkg" ] && continue
-            src="sbom/${pkg}-${{ matrix.target }}.cdx.json"
+            if ! jq -e --arg p "$pkg" '.packages[] | select(.name == $p)' <<< "$META" > /dev/null; then
+              echo "ERROR: SBOM requested for '$pkg', which is not a package of this workspace" >&2
+              exit 1
+            fi
+            dir=$(jq -r --arg p "$pkg" '
+              .workspace_root as $root
+              | .packages[] | select(.name == $p) | .manifest_path
+              | ltrimstr($root) | gsub("\\\\"; "/") | ltrimstr("/")
+              | sub("/?Cargo\\.toml$"; "")' <<< "$META")
+            dir="${dir:-.}"
+            src=""
+            n=0
+            for f in "$dir"/*.cdx.json; do
+              [ -e "$f" ] || continue
+              src="$f"
+              n=$((n + 1))
+            done
+            if [ "$n" -ne 1 ]; then
+              echo "ERROR: expected one SBOM for package '$pkg' in '$dir', found $n" >&2
+              ls -la "$dir" >&2
+              exit 1
+            fi
             # The version-package SBOM keeps the bare archive name for
             # backward compatibility; extras are suffixed with the package.
             if [ "$pkg" = "$BIN_VERSION_PACKAGE" ]; then
@@ -593,14 +615,11 @@ jobs:
             else
               dest="${ARCHIVE_BASE}-${pkg}.cdx.json"
             fi
-            if [ -f "$src" ]; then
-              # GITHUB_WORKSPACE is the job's absolute checkout root — using
-              # it (rather than a relative "..") keeps this correct
-              # regardless of how deep workspace-dir is nested.
-              cp "$src" "${GITHUB_WORKSPACE}/${dest}"
-            else
-              echo "WARNING: no SBOM found at $src, skipping SBOM attach for $pkg on this target"
-            fi
+            echo "SBOM of $pkg: $src -> $dest"
+            # GITHUB_WORKSPACE is the job's absolute checkout root — using
+            # it (rather than a relative "..") keeps this correct
+            # regardless of how deep workspace-dir is nested.
+            cp "$src" "${GITHUB_WORKSPACE}/${dest}"
           done
 
       - name: Attest build provenance

@@ -1,4 +1,5 @@
-//! The `fixture-cli-two` binary, the selftest's second caller (see lib.rs).
+//! The `fixture-cli-two` binary, the selftest's second caller (see
+//! fixture-cli's lib.rs).
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

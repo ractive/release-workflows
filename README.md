@@ -38,8 +38,8 @@ duplication is intentional; see the comment at the top of each file.
 | `workspace-dir` | string | `"."` | Path, relative to the caller repo root, to the Cargo workspace to build. Every `cargo`/`cross`/`cargo-deb`/`cargo-generate-rpm` invocation runs with this as its working directory. Used by `selftest.yml` to point at `testdata/fixture-cli`; app repos normally leave this at the default. |
 | `publish-crates` | string | `""` | Comma-separated, dependency-ordered list of crates to publish to crates.io. Empty skips crates.io. |
 | `targets` | string (JSON) | 7-target union (see below) | JSON array of `{"target", "os", "cross", "run_tests"}` matrix entries. |
-| `enable-sbom` | boolean | `true` | Generate a CycloneDX SBOM via `cargo-cyclonedx` on native (non-cross) targets. |
-| `sbom-packages` | string | `""` | Comma-separated packages to attach SBOMs for. Empty falls back to `version-package` only. The `version-package` SBOM is named `<archive>.cdx.json`; extras are `<archive>-<package>.cdx.json`. |
+| `enable-sbom` | boolean | `true` | Generate a CycloneDX SBOM via `cargo-cyclonedx` on native (non-cross) targets. Each requested package's SBOM is taken from its manifest's directory (found by name with `cargo metadata`, so `crates/foo-cli` may hold the package `foo`); a missing one fails the build job (before v0.3.1: a warning, and no SBOM). |
+| `sbom-packages` | string | `""` | Comma-separated packages to attach SBOMs for, by package name. Empty falls back to `version-package` only. The `version-package` SBOM is named `<archive>.cdx.json`; extras are `<archive>-<package>.cdx.json`. |
 | `enable-attestation` | boolean | `true` | Attest build provenance via `actions/attest-build-provenance` on native targets. Cross containers lack OIDC, so cross targets are always skipped. Skipped entirely in dry-run. |
 | `enable-linux-packages` | boolean | `false` | Build `.deb` and `.rpm` packages from a native `x86_64-unknown-linux-gnu` build via `cargo-deb` + `cargo-generate-rpm`. |
 | `linux-package-crate` | string | `""` | Crate to package for deb/rpm. Empty falls back to `version-package`. |
@@ -555,12 +555,14 @@ generation, and the dry-run summary — without touching crates.io, any
 Homebrew tap, Scoop bucket, winget fork, or any of the three app repos.
 
 A second caller, `selftest-two`, runs first in the same workflow run with
-`bin-name: fixture-cli-two` (a second binary of the fixture crate; `fixture-cli`
-is a prefix of its name), Linux only and `checksums-file:
-SHA256SUMS-fixture-cli-two`. So when `selftest` collects its artifacts, the
-other caller's are already in the run and match `fixture-cli-*`. The job
-`two-callers` then checks that each `dry-run-bundle-<bin-name>` holds only
-its own files and its own checksums file, which lists exactly them.
+`bin-name: fixture-cli-two` (the fixture workspace's second package, in
+`crates/two-cli`, a directory not named after it; `fixture-cli` is a prefix
+of its name), Linux only and `checksums-file: SHA256SUMS-fixture-cli-two`.
+So when `selftest` collects its artifacts, the other caller's are already
+in the run and match `fixture-cli-*`. The job `two-callers` then checks
+that each `dry-run-bundle-<bin-name>` holds only its own files and its own
+checksums file, which lists exactly them, and a CycloneDX SBOM for each
+native target (fixture-cli-two's found through its manifest directory).
 
 The job `macos-unsigned` unpacks the macOS archive and checks the
 binary carries only the linker's ad-hoc signature: the selftest passes no

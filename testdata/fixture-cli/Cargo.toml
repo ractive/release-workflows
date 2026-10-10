@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fixture-cli"]
+members = ["crates/fixture-cli", "crates/two-cli"]
 
 [workspace.package]
 version = "0.0.1"
