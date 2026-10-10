@@ -64,8 +64,15 @@ jobs:
             echo "::group::Publishing $crate"
             max_attempts=10
             delay=15
+            # crates.io answers 429 when an account publishes too many new
+            # crates in a short time, and lets one more through about every
+            # 10 minutes. Those waits do not count as attempts.
+            rate_waits=0
+            max_rate_waits=6
             published=false
-            for attempt in $(seq 1 "$max_attempts"); do
+            attempt=0
+            while [ "$attempt" -lt "$max_attempts" ]; do
+              attempt=$((attempt + 1))
               echo "Publishing $crate (attempt $attempt/$max_attempts)..."
               if output=$(cargo publish --package "$crate" --locked 2>&1); then
                 echo "$output"
@@ -78,6 +85,17 @@ jobs:
                 echo "$crate already published, skipping."
                 published=true
                 break
+              fi
+              if echo "$output" | grep -qiE 'status 429|too many requests|too many new crates'; then
+                if [ "$rate_waits" -ge "$max_rate_waits" ]; then
+                  echo "ERROR: crates.io still rate-limits $crate after $max_rate_waits waits of 600s" >&2
+                  exit 1
+                fi
+                rate_waits=$((rate_waits + 1))
+                attempt=$((attempt - 1))
+                echo "crates.io rate limit (429), waiting 600s ($rate_waits/$max_rate_waits)..."
+                sleep 600
+                continue
               fi
               if echo "$output" | grep -qiE 'failed to select a version|no matching package named|depends on'; then
                 if [ "$attempt" -eq "$max_attempts" ]; then

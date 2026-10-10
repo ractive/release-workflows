@@ -131,6 +131,11 @@ on:
         required: false
         type: string
         default: ""
+      checksums-file:
+        description: "Name of the checksums file the release (and the dry-run bundle) carries, and that the homebrew, scoop and aur jobs read. A repository that runs two callers against one release gives each its own name. Letters, digits, '.', '_' and '-' only."
+        required: false
+        type: string
+        default: "SHA256SUMS"
       macos-sign-dry-run:
         description: "Sign and notarise the macOS binaries in a dry run too, when the Apple secrets exist. Off by default: a dry run builds an unreviewed ref, which should not get the signing key (docs/macos-signing.md)."
         required: false
@@ -179,8 +184,15 @@ jobs:
           VERSION_PACKAGE: ${{ inputs.version-package }}
           DRY_RUN: ${{ inputs.dry-run }}
           TAG: ${{ github.event.release.tag_name }}
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         run: |
           set -euo pipefail
+          # Used as a file name, a `gh release download --pattern` glob and a
+          # URL path segment, so no glob, path or URL characters.
+          if ! [[ "$CHECKSUMS_FILE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "ERROR: checksums-file '$CHECKSUMS_FILE' may only contain letters, digits, '.', '_' and '-'" >&2
+            exit 1
+          fi
           META=$(cargo metadata --no-deps --format-version 1)
           CARGO_VERSION=$(echo "$META" | jq -r --arg pkg "$VERSION_PACKAGE" '.packages[] | select(.name == $pkg) | .version')
           if [ -z "$CARGO_VERSION" ]; then
@@ -342,7 +354,7 @@ jobs:
 
       # --- macOS signing (only with APPLE_CERTIFICATE; docs/macos-signing.md).
       # It runs after the pre-package command and before packaging, so the
-      # archive, its SBOM and attestation, SHA256SUMS and the Homebrew
+      # archive, its SBOM and attestation, the checksums file and the Homebrew
       # checksum all describe the signed binary. Notarising does not change
       # the binary: a bare Mach-O cannot carry a stapled ticket, so
       # Gatekeeper looks the ticket up online on first launch.
@@ -726,7 +738,7 @@ jobs:
   # 5. GitHub release upload (skipped in dry-run)
   # ---------------------------------------------------------------------
   release:
-    needs: [build, linux-packages]
+    needs: [version-check, build, linux-packages]
     if: |
       !cancelled() && !inputs.dry-run &&
       needs.build.result == 'success' &&
@@ -739,17 +751,45 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download all artifacts
+      # Only this caller's artifacts: a repository that runs two callers in
+      # one workflow run has the other's in the same run. The pattern
+      # narrows the download; the file filter drops what a longer bin-name
+      # with this one as its prefix uploaded (bin-name `foo` also matches
+      # the artifacts of `foo-bar`). Every file this workflow uploads starts
+      # with `<bin-name>-v<version>-`.
+      - name: Download this caller's artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
+          pattern: ${{ inputs.bin-name }}-*
           merge-multiple: true
 
-      - name: Generate SHA256SUMS
+      - name: Keep only this caller's files
+        shell: bash
+        env:
+          BIN_NAME: ${{ inputs.bin-name }}
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd artifacts
+          for f in *; do
+            case "$f" in
+              "${BIN_NAME}-v${VERSION}-"*) ;;
+              *) echo "Not this caller's, dropped: $f"; rm -rf -- "$f" ;;
+            esac
+          done
+          if ! compgen -G "${BIN_NAME}-v${VERSION}-*" > /dev/null; then
+            echo "ERROR: no artifacts of ${BIN_NAME} ${VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Generate the checksums file
+        env:
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         run: |
           cd artifacts
-          sha256sum -- * > SHA256SUMS
-          cat SHA256SUMS
+          sha256sum -- * > "${CHECKSUMS_FILE}"
+          cat "${CHECKSUMS_FILE}"
 
       - name: Upload assets to release
         env:
@@ -761,7 +801,7 @@ jobs:
   # 6. Dry-run summary (only in dry-run)
   # ---------------------------------------------------------------------
   dry-run-summary:
-    needs: [build, linux-packages]
+    needs: [version-check, build, linux-packages]
     if: |
       !cancelled() && inputs.dry-run &&
       needs.build.result == 'success' &&
@@ -770,26 +810,59 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Download all artifacts
+      # Only this caller's artifacts: a repository that runs two callers in
+      # one workflow run has the other's in the same run. The pattern
+      # narrows the download; the file filter drops what a longer bin-name
+      # with this one as its prefix uploaded (bin-name `foo` also matches
+      # the artifacts of `foo-bar`). Every file this workflow uploads starts
+      # with `<bin-name>-v<version>-`.
+      - name: Download this caller's artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
+          pattern: ${{ inputs.bin-name }}-*
           merge-multiple: true
 
-      - name: Generate SHA256SUMS
+      - name: Keep only this caller's files
+        shell: bash
+        env:
+          BIN_NAME: ${{ inputs.bin-name }}
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd artifacts
+          for f in *; do
+            case "$f" in
+              "${BIN_NAME}-v${VERSION}-"*) ;;
+              *) echo "Not this caller's, dropped: $f"; rm -rf -- "$f" ;;
+            esac
+          done
+          if ! compgen -G "${BIN_NAME}-v${VERSION}-*" > /dev/null; then
+            echo "ERROR: no artifacts of ${BIN_NAME} ${VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Generate the checksums file
+        env:
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         run: |
           cd artifacts
-          sha256sum -- * > SHA256SUMS
-          cat SHA256SUMS
+          sha256sum -- * > "${CHECKSUMS_FILE}"
+          cat "${CHECKSUMS_FILE}"
 
+      # Named after bin-name so two callers' bundles do not collide, with
+      # the bin-name last so that a caller's own `<bin-name>-*` download of
+      # the run's artifacts does not take the bundle in too.
       - name: Upload dry-run bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: dry-run-bundle
+          name: dry-run-bundle-${{ inputs.bin-name }}
           path: artifacts/*
 
       - name: Print summary
         shell: bash
+        env:
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         run: |
           {
             echo "## Dry-run release bundle"
@@ -798,7 +871,7 @@ jobs:
             echo "| --- | --- |"
             cd artifacts
             for f in *; do
-              [ "$f" = "SHA256SUMS" ] && continue
+              [ "$f" = "$CHECKSUMS_FILE" ] && continue
               size=$(du -h "$f" | cut -f1)
               echo "| $f | $size |"
             done
@@ -857,8 +930,15 @@ jobs:
             echo "::group::Publishing $crate"
             max_attempts=10
             delay=15
+            # crates.io answers 429 when an account publishes too many new
+            # crates in a short time, and lets one more through about every
+            # 10 minutes. Those waits do not count as attempts.
+            rate_waits=0
+            max_rate_waits=6
             published=false
-            for attempt in $(seq 1 "$max_attempts"); do
+            attempt=0
+            while [ "$attempt" -lt "$max_attempts" ]; do
+              attempt=$((attempt + 1))
               echo "Publishing $crate (attempt $attempt/$max_attempts)..."
               if output=$(cargo publish --package "$crate" --locked 2>&1); then
                 echo "$output"
@@ -871,6 +951,17 @@ jobs:
                 echo "$crate already published, skipping."
                 published=true
                 break
+              fi
+              if echo "$output" | grep -qiE 'status 429|too many requests|too many new crates'; then
+                if [ "$rate_waits" -ge "$max_rate_waits" ]; then
+                  echo "ERROR: crates.io still rate-limits $crate after $max_rate_waits waits of 600s" >&2
+                  exit 1
+                fi
+                rate_waits=$((rate_waits + 1))
+                attempt=$((attempt - 1))
+                echo "crates.io rate limit (429), waiting 600s ($rate_waits/$max_rate_waits)..."
+                sleep 600
+                continue
               fi
               if echo "$output" | grep -qiE 'failed to select a version|no matching package named|depends on'; then
                 if [ "$attempt" -eq "$max_attempts" ]; then
@@ -906,13 +997,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download SHA256SUMS from release
+      - name: Download the checksums file from release
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_EVENT_RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         run: |
           gh release download "${GITHUB_EVENT_RELEASE_TAG_NAME}" \
-            --pattern "SHA256SUMS" --dir .
+            --pattern "${CHECKSUMS_FILE}" --dir .
 
       - name: Update Homebrew formula
         env:
@@ -924,6 +1016,7 @@ jobs:
           FORMULA_CAVEATS: ${{ inputs.homebrew-caveats }}
           HOMEBREW_TAP: ${{ inputs.homebrew-tap }}
           VERSION: ${{ needs.version-check.outputs.version }}
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         run: |
           set -euo pipefail
 
@@ -939,7 +1032,7 @@ jobs:
           RELEASE_URL="https://github.com/${REPO}/releases/download"
 
           get_sha() {
-            awk -v file="$1" '$2 == file {print $1}' SHA256SUMS
+            awk -v file="$1" '$2 == file {print $1}' "$CHECKSUMS_FILE"
           }
 
           # Prefer musl artifacts for Linux where available (statically
@@ -948,9 +1041,9 @@ jobs:
             local arch="$1"
             local musl_name="${BIN_NAME}-v${VERSION}-${arch}-unknown-linux-musl.tar.gz"
             local gnu_name="${BIN_NAME}-v${VERSION}-${arch}-unknown-linux-gnu.tar.gz"
-            if grep -q " $musl_name\$" SHA256SUMS; then
+            if grep -q " $musl_name\$" "$CHECKSUMS_FILE"; then
               echo "$musl_name"
-            elif grep -q " $gnu_name\$" SHA256SUMS; then
+            elif grep -q " $gnu_name\$" "$CHECKSUMS_FILE"; then
               echo "$gnu_name"
             else
               echo ""
@@ -964,14 +1057,14 @@ jobs:
           SHA_MACOS_ARM64=""
           SHA_LINUX_ARM64=""
           SHA_LINUX_X86=""
-          if grep -q " ${MACOS_ARM64_FILE}\$" SHA256SUMS; then
+          if grep -q " ${MACOS_ARM64_FILE}\$" "$CHECKSUMS_FILE"; then
             SHA_MACOS_ARM64=$(get_sha "$MACOS_ARM64_FILE")
           fi
           [ -n "$LINUX_ARM64_FILE" ] && SHA_LINUX_ARM64=$(get_sha "$LINUX_ARM64_FILE")
           [ -n "$LINUX_X86_FILE" ] && SHA_LINUX_X86=$(get_sha "$LINUX_X86_FILE")
 
           if [ -z "$SHA_MACOS_ARM64" ] && [ -z "$SHA_LINUX_ARM64" ] && [ -z "$SHA_LINUX_X86" ]; then
-            echo "ERROR: no known platform artifacts found in SHA256SUMS for Homebrew formula" >&2
+            echo "ERROR: no known platform artifacts found in ${CHECKSUMS_FILE} for Homebrew formula" >&2
             exit 1
           fi
 
@@ -1046,7 +1139,20 @@ jobs:
             echo "Formula unchanged, skipping commit"
           else
             git commit -m "Update ${FORMULA_NAME} to ${VERSION}"
-            git push
+            # Two callers in one run (or two releases at once) push to the
+            # same tap: a rejected push rebases onto the other's commit
+            # (another file) and tries again, 5 pushes in all.
+            for attempt in 1 2 3 4 5; do
+              if git push; then
+                break
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                echo "ERROR: push to ${HOMEBREW_TAP} failed 5 times" >&2
+                exit 1
+              fi
+              sleep $((attempt * 5))
+              git pull --rebase
+            done
           fi
 
   # ---------------------------------------------------------------------
@@ -1063,13 +1169,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download SHA256SUMS from release
+      - name: Download the checksums file from release
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_EVENT_RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         run: |
           gh release download "${GITHUB_EVENT_RELEASE_TAG_NAME}" \
-            --pattern "SHA256SUMS" --dir .
+            --pattern "${CHECKSUMS_FILE}" --dir .
 
       - name: Update Scoop manifest
         shell: bash
@@ -1080,6 +1187,7 @@ jobs:
           VERSION: ${{ needs.version-check.outputs.version }}
           OVERRIDE_DESCRIPTION: ${{ inputs.homebrew-description }}
           CARGO_DESCRIPTION: ${{ needs.version-check.outputs.description }}
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         run: |
           set -euo pipefail
 
@@ -1093,7 +1201,7 @@ jobs:
           DESCRIPTION="${OVERRIDE_DESCRIPTION:-${CARGO_DESCRIPTION:-${BIN_NAME} CLI}}"
 
           get_sha() {
-            awk -v file="$1" '$2 == file {print $1}' SHA256SUMS
+            awk -v file="$1" '$2 == file {print $1}' "$CHECKSUMS_FILE"
           }
 
           WIN_X64_FILE="${BIN_NAME}-v${VERSION}-x86_64-pc-windows-msvc.zip"
@@ -1101,11 +1209,11 @@ jobs:
 
           SHA_WIN_X64=""
           SHA_WIN_ARM64=""
-          grep -q " ${WIN_X64_FILE}\$" SHA256SUMS && SHA_WIN_X64=$(get_sha "$WIN_X64_FILE")
-          grep -q " ${WIN_ARM64_FILE}\$" SHA256SUMS && SHA_WIN_ARM64=$(get_sha "$WIN_ARM64_FILE")
+          grep -q " ${WIN_X64_FILE}\$" "$CHECKSUMS_FILE" && SHA_WIN_X64=$(get_sha "$WIN_X64_FILE")
+          grep -q " ${WIN_ARM64_FILE}\$" "$CHECKSUMS_FILE" && SHA_WIN_ARM64=$(get_sha "$WIN_ARM64_FILE")
 
           if [ -z "$SHA_WIN_X64" ] && [ -z "$SHA_WIN_ARM64" ]; then
-            echo "ERROR: no Windows artifacts found in SHA256SUMS for Scoop manifest" >&2
+            echo "ERROR: no Windows artifacts found in ${CHECKSUMS_FILE} for Scoop manifest" >&2
             exit 1
           fi
 
@@ -1121,6 +1229,7 @@ jobs:
             --arg win_arm64_file "$WIN_ARM64_FILE" \
             --arg sha_x64 "$SHA_WIN_X64" \
             --arg sha_arm64 "$SHA_WIN_ARM64" \
+            --arg checksums_file "$CHECKSUMS_FILE" \
             '
             def arch_entry(file; sha):
               if (sha | length) > 0 then
@@ -1148,7 +1257,7 @@ jobs:
                       "64bit": {
                         url: "\($release_url)/v$version/\($bin_name)-v$version-x86_64-pc-windows-msvc.zip",
                         hash: {
-                          url: "\($release_url)/v$version/SHA256SUMS",
+                          url: "\($release_url)/v$version/\($checksums_file)",
                           regex: "([a-fA-F0-9]+)\\s+\($bin_name)-v$version-x86_64-pc-windows-msvc\\.zip"
                         }
                       }
@@ -1157,7 +1266,7 @@ jobs:
                       arm64: {
                         url: "\($release_url)/v$version/\($bin_name)-v$version-aarch64-pc-windows-msvc.zip",
                         hash: {
-                          url: "\($release_url)/v$version/SHA256SUMS",
+                          url: "\($release_url)/v$version/\($checksums_file)",
                           regex: "([a-fA-F0-9]+)\\s+\($bin_name)-v$version-aarch64-pc-windows-msvc\\.zip"
                         }
                       }
@@ -1178,7 +1287,19 @@ jobs:
             echo "Manifest unchanged, skipping commit"
           else
             git commit -m "Update ${BIN_NAME} to ${VERSION}"
-            git push
+            # As in the homebrew job: rebase onto a concurrent push and try
+            # again, 5 pushes in all.
+            for attempt in 1 2 3 4 5; do
+              if git push; then
+                break
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                echo "ERROR: push to ${SCOOP_BUCKET} failed 5 times" >&2
+                exit 1
+              fi
+              sleep $((attempt * 5))
+              git pull --rebase
+            done
           fi
 
   # ---------------------------------------------------------------------
@@ -1247,13 +1368,14 @@ jobs:
             exit 1
           fi
 
-      - name: Download SHA256SUMS from release
+      - name: Download the checksums file from release
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_EVENT_RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         run: |
           gh release download "${GITHUB_EVENT_RELEASE_TAG_NAME}" \
-            --pattern "SHA256SUMS" --dir .
+            --pattern "${CHECKSUMS_FILE}" --dir .
 
       - name: Generate PKGBUILD
         env:
@@ -1263,6 +1385,7 @@ jobs:
           FORMULA_DESCRIPTION: ${{ inputs.homebrew-description }}
           CARGO_DESCRIPTION: ${{ needs.version-check.outputs.description }}
           VERSION: ${{ needs.version-check.outputs.version }}
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         run: |
           set -euo pipefail
 
@@ -1272,7 +1395,7 @@ jobs:
           RELEASE_URL="https://github.com/${REPO}/releases/download"
 
           get_sha() {
-            awk -v file="$1" '$2 == file {print $1}' SHA256SUMS
+            awk -v file="$1" '$2 == file {print $1}' "$CHECKSUMS_FILE"
           }
 
           # Same musl-first-else-gnu preference as the Homebrew job, applied
@@ -1282,9 +1405,9 @@ jobs:
             local arch="$1"
             local musl_name="${BIN_NAME}-v${VERSION}-${arch}-unknown-linux-musl.tar.gz"
             local gnu_name="${BIN_NAME}-v${VERSION}-${arch}-unknown-linux-gnu.tar.gz"
-            if grep -q " $musl_name\$" SHA256SUMS; then
+            if grep -q " $musl_name\$" "$CHECKSUMS_FILE"; then
               echo "$musl_name"
-            elif grep -q " $gnu_name\$" SHA256SUMS; then
+            elif grep -q " $gnu_name\$" "$CHECKSUMS_FILE"; then
               echo "$gnu_name"
             else
               echo ""
@@ -1300,7 +1423,7 @@ jobs:
           [ -n "$ARM64_FILE" ] && SHA_ARM64=$(get_sha "$ARM64_FILE")
 
           if [ -z "$SHA_X86" ] && [ -z "$SHA_ARM64" ]; then
-            echo "ERROR: no Linux artifacts found in SHA256SUMS for PKGBUILD" >&2
+            echo "ERROR: no Linux artifacts found in ${CHECKSUMS_FILE} for PKGBUILD" >&2
             exit 1
           fi
 
