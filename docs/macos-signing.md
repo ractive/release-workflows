@@ -53,7 +53,7 @@ a repository.
 
 ```sh
 scripts/set-apple-secrets.sh --dry-run   # checks the files, sets nothing
-scripts/set-apple-secrets.sh             # hyalo hoppy ff-rdp hptx saturnus
+scripts/set-apple-secrets.sh             # hyalo hoppy ff-rdp saturnus
 scripts/set-apple-secrets.sh hyalo       # or only some repos
 ```
 
@@ -86,8 +86,8 @@ binaries even with the secrets set.
 
 ## Testing the setup with a dry run
 
-Dry runs do not sign. In every caller (saturnus, hyalo, hoppy, ff-rdp,
-hptx) `dry-run` is `github.event_name == 'workflow_dispatch'`: a run
+Dry runs do not sign. In every caller (saturnus, hyalo, hoppy, ff-rdp)
+`dry-run` is `github.event_name == 'workflow_dispatch'`: a run
 started by hand from the Actions tab, on any branch. Such a run executes
 that branch's `build.rs` and `pre-package-command` before the signing
 steps, unreviewed, on the runner that would hold the Developer ID key, and

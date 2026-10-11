@@ -19,7 +19,7 @@
 set -euo pipefail
 
 DEFAULT_OWNER="ractive"
-DEFAULT_REPOS=(hyalo hoppy ff-rdp hptx saturnus)
+DEFAULT_REPOS=(hyalo hoppy ff-rdp saturnus)
 
 DRY_RUN=false
 REPOS=()
