@@ -1368,12 +1368,54 @@ jobs:
           INPUTS_WINGET_PKGS_FORK: ${{ inputs.winget-pkgs-fork }}
         run: gh repo sync "${INPUTS_WINGET_PKGS_FORK}"
 
+      # komac is pinned to 2.16.0 and run directly. winget-releaser always
+      # installs the newest komac, and komac 2.17.0 made PortableCommandAlias
+      # optional (russellbanks/Komac#1698): `komac update` then drops the
+      # alias, and the validator cannot find the command (ff-rdp 0.4.3 and
+      # hoppy 0.8.0, October 2026). Move the pin only after checking that a
+      # newer komac keeps the alias on update.
+      - name: Install komac 2.16.0
+        env:
+          KOMAC_VERSION: "2.16.0"
+          KOMAC_SHA256: "7d2707fa6210f2789a3702de49fbd150b736dbf426ee0b9bc8e098736f9fd82d"
+        run: |
+          set -euo pipefail
+          tarball="komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${tarball}" \
+            "https://github.com/russellbanks/Komac/releases/download/v${KOMAC_VERSION}/${tarball}"
+          echo "${KOMAC_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/komac"
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}/komac" komac
+          echo "${RUNNER_TEMP}/komac" >> "${GITHUB_PATH}"
+
       - name: Submit to winget-pkgs
-        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
-        with:
-          identifier: ${{ inputs.winget-identifier }}
-          installers-regex: '${{ inputs.bin-name }}-.*-pc-windows-msvc\.zip$'
-          token: ${{ secrets.WINGET_TOKEN }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          KOMAC_FORK_OWNER: ${{ github.repository_owner }}
+          KOMAC_CREATED_WITH: ractive/release-workflows
+          KOMAC_CREATED_WITH_URL: ${{ github.server_url }}/ractive/release-workflows
+          TAG: ${{ github.event.release.tag_name }}
+          WINGET_IDENTIFIER: ${{ inputs.winget-identifier }}
+          BIN_NAME: ${{ inputs.bin-name }}
+        run: |
+          set -euo pipefail
+          komac --version
+          version="${TAG#v}"
+          mapfile -t urls < <(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets \
+            --jq '.assets[].url' | grep -E "/${BIN_NAME}-[^/]*-pc-windows-msvc\.zip$")
+          if [ "${#urls[@]}" -eq 0 ]; then
+            echo "ERROR: no ${BIN_NAME}-*-pc-windows-msvc.zip assets on ${TAG}" >&2
+            exit 1
+          fi
+          printf 'installer: %s\n' "${urls[@]}"
+          komac update "${WINGET_IDENTIFIER}" --version "${version}" --submit --urls "${urls[@]}"
+
+      - name: Clean up merged winget-pkgs branches
+        env:
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          KOMAC_FORK_OWNER: ${{ github.repository_owner }}
+        run: komac cleanup --only-merged
 
   # ---------------------------------------------------------------------
   # 11. AUR (conditional, skipped in dry-run, non-blocking)

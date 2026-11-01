@@ -413,9 +413,14 @@ every consuming repo's next release.
 - Repository secrets as documented above, scoped per the permissions table.
 - Existing Homebrew tap (`ractive/homebrew-tap`), Scoop bucket
   (`ractive/scoop-bucket`), and — for winget — an existing, already-synced
-  fork of `microsoft/winget-pkgs` under the `ractive` org. `winget-releaser`
-  can only update packages that already exist upstream; the first submission
-  of a new package must be done manually via PR to `microsoft/winget-pkgs`.
+  fork of `microsoft/winget-pkgs` under the `ractive` org. The `winget` job
+  runs `komac update`, which can only update packages that already exist
+  upstream; the first submission of a new package must be done manually via
+  PR to `microsoft/winget-pkgs`. komac is pinned to 2.16.0 (checksum-verified):
+  from 2.17.0 on, `komac update` drops `PortableCommandAlias` from portable
+  zip manifests (russellbanks/Komac#1698), and winget validation then cannot
+  find the command. Since v0.3.2; before, the job used `winget-releaser`,
+  which always installs the newest komac.
 
 ## Linux distro publishing
 
@@ -575,7 +580,7 @@ every release takes until the secrets exist (and every dry run without
 The publish-side jobs — `crates-io`, `homebrew`, `scoop`, `winget` — are
 skipped entirely in `dry-run` mode (see the `dry-run` input above), so
 `selftest.yml` never exercises the real crates.io upload, the Homebrew tap
-git push, the Scoop bucket git push, or the winget-releaser submission. Those
+git push, the Scoop bucket git push, or the komac winget submission. Those
 paths are only exercised by a real release (`release` event) in an app repo.
 The [dry-run caller example](#dry-run-caller-validate-the-pipeline-without-cutting-a-release)
 above gives app repos an additional pre-release check — run it manually
