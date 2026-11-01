@@ -1346,7 +1346,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # winget-releaser can only update existing packages — the first version
+    # `komac update` can only update existing packages — the first version
     # must be submitted manually via PR to microsoft/winget-pkgs. Non-blocking
     # so a winget hiccup never fails the release.
     continue-on-error: true
@@ -1402,8 +1402,9 @@ jobs:
           set -euo pipefail
           komac --version
           version="${TAG#v}"
-          mapfile -t urls < <(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets \
-            --jq '.assets[].url' | grep -E "/${BIN_NAME}-[^/]*-pc-windows-msvc\.zip$")
+          # A failing gh call stops the step here (set -e), not as "no assets".
+          assets=$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].url')
+          mapfile -t urls < <(grep -E "/${BIN_NAME}-[^/]*-pc-windows-msvc\.zip$" <<<"${assets}" || true)
           if [ "${#urls[@]}" -eq 0 ]; then
             echo "ERROR: no ${BIN_NAME}-*-pc-windows-msvc.zip assets on ${TAG}" >&2
             exit 1
