@@ -57,7 +57,7 @@ on:
         type: string
         default: ""
       enable-attestation:
-        description: "Attest build provenance on native (non-cross) targets"
+        description: "Attest build provenance on every target, cross-compiled ones included (skipped in dry-run)"
         required: false
         type: boolean
         default: true
@@ -625,7 +625,11 @@ jobs:
           done
 
       - name: Attest build provenance
-        if: inputs.enable-attestation && !matrix.cross && !inputs.dry-run
+        # Cross targets too: cross only containerizes the compile, while this
+        # step runs on the host runner, which has the OIDC token. Verified on
+        # all three cross targets (attest + gh attestation verify, run
+        # 43107690247). setup-hyalo needs aarch64-unknown-linux-gnu attested.
+        if: inputs.enable-attestation && !inputs.dry-run
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           # A single prefix glob: only one of .tar.gz/.zip exists per
