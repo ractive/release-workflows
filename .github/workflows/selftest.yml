@@ -173,3 +173,16 @@ jobs:
           # Native targets only: cross builds have no SBOM.
           sboms fixture-cli x86_64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc
           sboms fixture-cli-two x86_64-unknown-linux-gnu
+          # deb/rpm for both architectures (fixture-cli enables them,
+          # fixture-cli-two does not).
+          for arch in x86_64 aarch64; do
+            for ext in deb rpm; do
+              f="bundles/dry-run-bundle-fixture-cli/fixture-cli-v0.0.1-${arch}-linux.${ext}"
+              [ -s "$f" ] || { echo "ERROR: no package $f" >&2; exit 1; }
+            done
+          done
+          [ "$(dpkg-deb --field bundles/dry-run-bundle-fixture-cli/fixture-cli-v0.0.1-aarch64-linux.deb Architecture)" = arm64 ] \
+            || { echo "ERROR: the aarch64 deb is not arm64" >&2; exit 1; }
+          if compgen -G "bundles/dry-run-bundle-fixture-cli-two/*.deb" > /dev/null; then
+            echo "ERROR: fixture-cli-two has packages but does not enable them" >&2; exit 1
+          fi

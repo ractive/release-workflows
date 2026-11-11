@@ -62,7 +62,7 @@ on:
         type: boolean
         default: true
       enable-linux-packages:
-        description: "Build .deb and .rpm packages from a native x86_64-unknown-linux-gnu build"
+        description: "Build .deb and .rpm packages for x86_64 and aarch64, each from a native *-unknown-linux-gnu build on a runner of that architecture"
         required: false
         type: boolean
         default: false
@@ -647,10 +647,23 @@ jobs:
   # ---------------------------------------------------------------------
   # 4. Linux packages (deb/rpm) — conditional
   # ---------------------------------------------------------------------
+  # One native build per architecture: cargo-deb and cargo-generate-rpm
+  # take the package architecture (amd64/x86_64, arm64/aarch64) from the
+  # host, the [package.metadata.*] asset paths name target/release/, and
+  # pre-package-command can run the binary it just built. GitHub's arm64
+  # runners are free for public repositories.
   linux-packages:
     needs: [version-check, security]
     if: inputs.enable-linux-packages
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -660,7 +673,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          key: linux-packages
+          key: linux-packages-${{ matrix.arch }}
           workspaces: ${{ inputs.workspace-dir }}
 
       - name: Build release binary
@@ -672,7 +685,7 @@ jobs:
         shell: bash
         working-directory: ${{ inputs.workspace-dir }}
         env:
-          TARGET: x86_64-unknown-linux-gnu
+          TARGET: ${{ matrix.arch }}-unknown-linux-gnu
           CROSS: "false"
           BIN_NAME: ${{ inputs.bin-name }}
           VERSION: ${{ needs.version-check.outputs.version }}
@@ -731,27 +744,49 @@ jobs:
           BIN_NAME: ${{ inputs.bin-name }}
           VERSION: ${{ needs.version-check.outputs.version }}
           WORKSPACE_DIR: ${{ inputs.workspace-dir }}
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           mkdir -p dist
           for f in "${WORKSPACE_DIR}"/target/debian/*.deb; do
-            cp "$f" "dist/${BIN_NAME}-v${VERSION}-x86_64-linux.deb"
+            cp "$f" "dist/${BIN_NAME}-v${VERSION}-${ARCH}-linux.deb"
           done
           for f in "${WORKSPACE_DIR}"/target/generate-rpm/*.rpm; do
-            cp "$f" "dist/${BIN_NAME}-v${VERSION}-x86_64-linux.rpm"
+            cp "$f" "dist/${BIN_NAME}-v${VERSION}-${ARCH}-linux.rpm"
           done
+
+      # A runner of the wrong architecture would still produce packages,
+      # mislabelled by file name; check what the package itself declares.
+      - name: Check the package architecture
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          case "$ARCH" in
+            x86_64) want_deb=amd64 ;;
+            aarch64) want_deb=arm64 ;;
+            *) echo "ERROR: no deb architecture known for $ARCH" >&2; exit 1 ;;
+          esac
+          for f in dist/*.deb; do
+            got=$(dpkg-deb --field "$f" Architecture)
+            echo "$f: Architecture=$got"
+            [ "$got" = "$want_deb" ] || { echo "ERROR: $f is $got, expected $want_deb" >&2; exit 1; }
+          done
+          uname -m
+          [ "$(uname -m)" = "$ARCH" ] || { echo "ERROR: runner is $(uname -m), expected $ARCH" >&2; exit 1; }
 
       - name: Upload deb artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ inputs.bin-name }}-deb
+          name: ${{ inputs.bin-name }}-deb-${{ matrix.arch }}
           path: dist/*.deb
           if-no-files-found: error
 
       - name: Upload rpm artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ inputs.bin-name }}-rpm
+          name: ${{ inputs.bin-name }}-rpm-${{ matrix.arch }}
           path: dist/*.rpm
           if-no-files-found: error
 

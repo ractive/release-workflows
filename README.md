@@ -41,7 +41,7 @@ duplication is intentional; see the comment at the top of each file.
 | `enable-sbom` | boolean | `true` | Generate a CycloneDX SBOM via `cargo-cyclonedx` on native (non-cross) targets. Each requested package's SBOM is taken from its manifest's directory (found by name with `cargo metadata`, so `crates/foo-cli` may hold the package `foo`); a missing one fails the build job (before v0.3.1: a warning, and no SBOM). |
 | `sbom-packages` | string | `""` | Comma-separated packages to attach SBOMs for, by package name. Empty falls back to `version-package` only. The `version-package` SBOM is named `<archive>.cdx.json`; extras are `<archive>-<package>.cdx.json`. |
 | `enable-attestation` | boolean | `true` | Attest build provenance via `actions/attest-build-provenance` on native targets. Cross containers lack OIDC, so cross targets are always skipped. Skipped entirely in dry-run. |
-| `enable-linux-packages` | boolean | `false` | Build `.deb` and `.rpm` packages from a native `x86_64-unknown-linux-gnu` build via `cargo-deb` + `cargo-generate-rpm`. |
+| `enable-linux-packages` | boolean | `false` | Build `.deb` and `.rpm` packages for x86_64 and aarch64 via `cargo-deb` + `cargo-generate-rpm`, each from a native `*-unknown-linux-gnu` build on a runner of that architecture (`ubuntu-latest`, `ubuntu-24.04-arm`; the arm64 runner is free for public repositories only). |
 | `linux-package-crate` | string | `""` | Crate to package for deb/rpm. Empty falls back to `version-package`. |
 | `pre-package-command` | string | `""` | Bash command run after the build, before archiving/packaging (e.g. generate shell completions or man pages). Runs on every matrix target and in the linux-packages job. `TARGET`, `CROSS`, `BIN_NAME`, `VERSION`, `BIN_PATH` are exported; `BIN_PATH` is the built binary (relative to workspace-dir, `.exe` resolved on Windows). When `CROSS=true` that binary is not host-runnable, so produce files with a host build (e.g. `cargo run --bin <bin> --`) instead. |
 | `extra-archive-paths` | string | `""` | Newline- or space-separated extra paths (relative to workspace root) to include in archives alongside the binary, `LICENSE`, and `README.md`. |
@@ -75,9 +75,10 @@ Default `targets`:
 
 Archive/package artifact names are standardized on the versioned form:
 `<bin-name>-v<version>-<target>.tar.gz` (Unix) / `.zip` (Windows), and
-`<bin-name>-v<version>-x86_64-linux.deb` / `.rpm` for Linux packages. The
-Homebrew and Scoop jobs look for artifacts using exactly this naming, so
-`bin-name` must match what callers expect.
+`<bin-name>-v<version>-<arch>-linux.deb` / `.rpm` for Linux packages, with
+`<arch>` `x86_64` or `aarch64`. The Homebrew and Scoop jobs look for
+artifacts using exactly this naming, so `bin-name` must match what callers
+expect.
 
 ## `publish-crates.yml` inputs
 
