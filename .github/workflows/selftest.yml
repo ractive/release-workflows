@@ -175,14 +175,18 @@ jobs:
           sboms fixture-cli-two x86_64-unknown-linux-gnu
           # deb/rpm for both architectures (fixture-cli enables them,
           # fixture-cli-two does not).
+          command -v rpm > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends rpm; }
           for arch in x86_64 aarch64; do
+            base="bundles/dry-run-bundle-fixture-cli/fixture-cli-v0.0.1-${arch}-linux"
             for ext in deb rpm; do
-              f="bundles/dry-run-bundle-fixture-cli/fixture-cli-v0.0.1-${arch}-linux.${ext}"
-              [ -s "$f" ] || { echo "ERROR: no package $f" >&2; exit 1; }
+              [ -s "$base.$ext" ] || { echo "ERROR: no package $base.$ext" >&2; exit 1; }
             done
+            case "$arch" in x86_64) want_deb=amd64 ;; aarch64) want_deb=arm64 ;; esac
+            got=$(dpkg-deb --field "$base.deb" Architecture)
+            [ "$got" = "$want_deb" ] || { echo "ERROR: $base.deb is $got, expected $want_deb" >&2; exit 1; }
+            got=$(rpm -qp --queryformat '%{ARCH}' "$base.rpm")
+            [ "$got" = "$arch" ] || { echo "ERROR: $base.rpm is $got, expected $arch" >&2; exit 1; }
           done
-          [ "$(dpkg-deb --field bundles/dry-run-bundle-fixture-cli/fixture-cli-v0.0.1-aarch64-linux.deb Architecture)" = arm64 ] \
-            || { echo "ERROR: the aarch64 deb is not arm64" >&2; exit 1; }
           if compgen -G "bundles/dry-run-bundle-fixture-cli-two/*.deb" > /dev/null; then
             echo "ERROR: fixture-cli-two has packages but does not enable them" >&2; exit 1
           fi

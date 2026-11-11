@@ -773,6 +773,14 @@ jobs:
             echo "$f: Architecture=$got"
             [ "$got" = "$want_deb" ] || { echo "ERROR: $f is $got, expected $want_deb" >&2; exit 1; }
           done
+          # cargo-generate-rpm takes the arch from its own build, not the
+          # runner, so the rpm header is checked on its own.
+          command -v rpm > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends rpm; }
+          for f in dist/*.rpm; do
+            got=$(rpm -qp --queryformat '%{ARCH}' "$f")
+            echo "$f: ARCH=$got"
+            [ "$got" = "$ARCH" ] || { echo "ERROR: $f is $got, expected $ARCH" >&2; exit 1; }
+          done
           uname -m
           [ "$(uname -m)" = "$ARCH" ] || { echo "ERROR: runner is $(uname -m), expected $ARCH" >&2; exit 1; }
 
