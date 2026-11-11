@@ -151,7 +151,7 @@ permissions:
   attestations: write
 jobs:
   release:
-    uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.2
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.4.0
     secrets: inherit
     with:
       bin-name: hyalo
@@ -188,7 +188,7 @@ permissions:
   attestations: write
 jobs:
   release:
-    uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.2
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.4.0
     secrets: inherit
     with:
       bin-name: hoppy
@@ -266,7 +266,7 @@ permissions:
   attestations: write
 jobs:
   release:
-    uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.2
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.4.0
     secrets: inherit
     with:
       bin-name: ff-rdp
@@ -304,7 +304,7 @@ permissions:
   contents: read
 jobs:
   dry-run:
-    uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.2
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.4.0
     secrets: inherit
     with:
       bin-name: hyalo
@@ -344,13 +344,13 @@ the tag's version**, e.g. one workspace version that every crate inherits.
 ```yaml
 jobs:
   release:
-    uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.2
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.4.0
     secrets: inherit
     with:
       bin-name: foo
       version-package: foo-cli
   release-bar:
-    uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.2
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.4.0
     secrets: inherit
     with:
       bin-name: foo-bar
@@ -381,7 +381,7 @@ permissions:
   contents: read
 jobs:
   publish:
-    uses: ractive/release-workflows/.github/workflows/publish-crates.yml@v0.3.2
+    uses: ractive/release-workflows/.github/workflows/publish-crates.yml@v0.4.0
     secrets: inherit
     with:
       publish-crates: hyalo-core,hyalo-mdlint,hyalo-cli
@@ -395,7 +395,7 @@ release event triggers the app repos' own `release.yml`, which is separate
 from this repo's release process). Callers pin to a specific tag:
 
 ```yaml
-uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.2
+uses: ractive/release-workflows/.github/workflows/release.yml@v0.4.0
 ```
 
 Do not pin to `@main` — an unreviewed change here would immediately affect
