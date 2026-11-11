@@ -57,7 +57,7 @@ on:
         type: string
         default: ""
       enable-attestation:
-        description: "Attest build provenance on native (non-cross) targets"
+        description: "Attest build provenance on every target, cross-compiled ones included (skipped in dry-run)"
         required: false
         type: boolean
         default: true

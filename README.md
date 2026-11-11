@@ -40,7 +40,7 @@ duplication is intentional; see the comment at the top of each file.
 | `targets` | string (JSON) | 7-target union (see below) | JSON array of `{"target", "os", "cross", "run_tests"}` matrix entries. |
 | `enable-sbom` | boolean | `true` | Generate a CycloneDX SBOM via `cargo-cyclonedx` on native (non-cross) targets. Each requested package's SBOM is taken from its manifest's directory (found by name with `cargo metadata`, so `crates/foo-cli` may hold the package `foo`); a missing one fails the build job (before v0.3.1: a warning, and no SBOM). |
 | `sbom-packages` | string | `""` | Comma-separated packages to attach SBOMs for, by package name. Empty falls back to `version-package` only. The `version-package` SBOM is named `<archive>.cdx.json`; extras are `<archive>-<package>.cdx.json`. |
-| `enable-attestation` | boolean | `true` | Attest build provenance via `actions/attest-build-provenance` on every target, cross-compiled ones included (the attestation step runs on the host runner, not in the cross container). Skipped entirely in dry-run. |
+| `enable-attestation` | boolean | `true` | Attest build provenance via `actions/attest-build-provenance` on every target, cross-compiled ones included (the attestation step runs on the host runner, not in the cross container; v0.3.2 and earlier skipped cross targets). Skipped entirely in dry-run. |
 | `enable-linux-packages` | boolean | `false` | Build `.deb` and `.rpm` packages for x86_64 and aarch64 via `cargo-deb` + `cargo-generate-rpm`, each from a native `*-unknown-linux-gnu` build on a runner of that architecture (`ubuntu-latest`, `ubuntu-24.04-arm`; the arm64 runner is free for public repositories only). |
 | `linux-package-crate` | string | `""` | Crate to package for deb/rpm. Empty falls back to `version-package`. |
 | `pre-package-command` | string | `""` | Bash command run after the build, before archiving/packaging (e.g. generate shell completions or man pages). Runs on every matrix target and in the linux-packages job. `TARGET`, `CROSS`, `BIN_NAME`, `VERSION`, `BIN_PATH` are exported; `BIN_PATH` is the built binary (relative to workspace-dir, `.exe` resolved on Windows). When `CROSS=true` that binary is not host-runnable, so produce files with a host build (e.g. `cargo run --bin <bin> --`) instead. |
@@ -344,13 +344,13 @@ the tag's version**, e.g. one workspace version that every crate inherits.
 ```yaml
 jobs:
   release:
-    uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.0
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.2
     secrets: inherit
     with:
       bin-name: foo
       version-package: foo-cli
   release-bar:
-    uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.0
+    uses: ractive/release-workflows/.github/workflows/release.yml@v0.3.2
     secrets: inherit
     with:
       bin-name: foo-bar
@@ -557,7 +557,7 @@ across a 4-target matrix chosen to cover each distinct code path once
 
 | Target | OS | Path exercised |
 | --- | --- | --- |
-| `x86_64-unknown-linux-gnu` | `ubuntu-latest` | Native build + test + SBOM + attestation-eligible path |
+| `x86_64-unknown-linux-gnu` | `ubuntu-latest` | Native build + test + SBOM |
 | `x86_64-unknown-linux-musl` | `ubuntu-latest` | `cross`-containerized build (the `Cross.toml`/glibc-cache-poisoning path) |
 | `aarch64-apple-darwin` | `macos-latest` | Native macOS build |
 | `x86_64-pc-windows-msvc` | `windows-latest` | Windows `.zip` archive path (`7z`) |
