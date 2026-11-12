@@ -57,7 +57,7 @@ on:
         type: string
         default: ""
       enable-attestation:
-        description: "Attest build provenance on every target, cross-compiled ones included (skipped in dry-run)"
+        description: "Attest build provenance on every target, cross-compiled ones included, and on the .deb/.rpm packages (skipped in dry-run)"
         required: false
         type: boolean
         default: true
@@ -152,7 +152,7 @@ env:
 
 # No workflow-level permissions block: jobs that declare their own get least
 # privilege, while `build` and `linux-packages` deliberately inherit the
-# CALLER's grant. `build` conditionally needs id-token/attestations for
+# CALLER's grant. Both conditionally need id-token/attestations for
 # provenance attestation, and a called workflow's job that explicitly
 # requests more than the caller granted hard-fails even when the needing
 # step is skipped — inheritance is the only shape that serves both real
@@ -787,6 +787,19 @@ jobs:
           done
           uname -m
           [ "$(uname -m)" = "$ARCH" ] || { echo "ERROR: runner is $(uname -m), expected $ARCH" >&2; exit 1; }
+
+      # Same gate and same inherited id-token/attestations grant as the
+      # build job's attestation. Subjects are named by basename, which is
+      # the release asset name, so `gh attestation verify <file>.deb` works
+      # on a package downloaded from the release (v0.4.0 and earlier left
+      # the packages unattested).
+      - name: Attest build provenance
+        if: inputs.enable-attestation && !inputs.dry-run
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            dist/*.deb
+            dist/*.rpm
 
       - name: Upload deb artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
