@@ -18,3 +18,14 @@ rules:
       # false positive.
       - publish-crates.yml
       - release.yml
+  self-repository:
+    ignore:
+      # zizmor 1.30+ asks for GitHub's July-2026 `uses: $/...` self-repository
+      # syntax instead of `uses: ./...` for selftest.yml's two calls of
+      # release.yml. actionlint 1.7.12 (the latest release, also run by
+      # ci.yml) rejects `$/` as an invalid reusable-workflow reference
+      # (rhysd/actionlint#711, #760), so the two linters cannot both pass.
+      # selftest.yml only runs on push/pull_request, with no step before the
+      # call that could plant a different release.yml in the workspace.
+      # Switch to `$/` once actionlint accepts it.
+      - selftest.yml

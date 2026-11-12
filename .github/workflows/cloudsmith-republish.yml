@@ -24,7 +24,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -39,7 +39,7 @@ jobs:
             exit 1
           fi
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           # uv only runs a tool here; the caller repos have no Python
           # dependency files, so the cache would never be invalidated.
@@ -63,6 +63,9 @@ jobs:
         # https://docs.cloudsmith.com/formats/redhat-repository.
         env:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          # cloudsmith-cli 1.30+ sends crash reports to Sentry by default,
+          # also in CI; a release pipeline should not phone home.
+          CLOUDSMITH_NO_TELEMETRY: "1"
           CLOUDSMITH_REPO: ${{ inputs.cloudsmith-repo }}
         shell: bash
         run: |
@@ -70,9 +73,9 @@ jobs:
           shopt -s nullglob
           for f in dist/*.deb; do
             echo "Pushing $f to ${CLOUDSMITH_REPO}/any-distro/any-version..."
-            uvx --from cloudsmith-cli==1.19.0 cloudsmith push deb "${CLOUDSMITH_REPO}/any-distro/any-version" "$f"
+            uvx --from cloudsmith-cli==1.31.1 cloudsmith push deb "${CLOUDSMITH_REPO}/any-distro/any-version" "$f"
           done
           for f in dist/*.rpm; do
             echo "Pushing $f to ${CLOUDSMITH_REPO}/any-distro/any-version..."
-            uvx --from cloudsmith-cli==1.19.0 cloudsmith push rpm "${CLOUDSMITH_REPO}/any-distro/any-version" "$f"
+            uvx --from cloudsmith-cli==1.31.1 cloudsmith push rpm "${CLOUDSMITH_REPO}/any-distro/any-version" "$f"
           done

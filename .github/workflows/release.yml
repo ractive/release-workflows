@@ -170,11 +170,11 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       description: ${{ steps.version.outputs.description }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Resolve and verify version
         id: version
@@ -227,18 +227,18 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ${{ inputs.workspace-dir }}
 
       - name: Install security tools
-        uses: taiki-e/install-action@a1df9120380005ebdc788c62449b841b205541dd # v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-audit,cargo-deny
 
@@ -274,15 +274,15 @@ jobs:
       MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && (!inputs.dry-run || inputs.macos-sign-dry-run) }}
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # Without a per-target key every matrix job shares one cache (same
           # github.job + same lockfile hash), and the cross-container builds
@@ -294,7 +294,7 @@ jobs:
 
       - name: Install cross
         if: matrix.cross
-        uses: taiki-e/install-action@a1df9120380005ebdc788c62449b841b205541dd # v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cross
 
@@ -559,7 +559,7 @@ jobs:
 
       - name: Install cargo-cyclonedx
         if: inputs.enable-sbom && !matrix.cross
-        uses: taiki-e/install-action@a1df9120380005ebdc788c62449b841b205541dd # v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-cyclonedx
 
@@ -630,7 +630,7 @@ jobs:
         # all three cross targets (attest + gh attestation verify, run
         # 43107690247). setup-hyalo needs aarch64-unknown-linux-gnu attested.
         if: inputs.enable-attestation && !inputs.dry-run
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           # A single prefix glob: only one of .tar.gz/.zip exists per
           # platform, the action errors on literal paths that match nothing,
@@ -638,7 +638,7 @@ jobs:
           subject-path: ${{ env.ARCHIVE_BASE }}*
 
       - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.bin-name }}-${{ matrix.target }}
           path: |
@@ -669,13 +669,13 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: linux-packages-${{ matrix.arch }}
           workspaces: ${{ inputs.workspace-dir }}
@@ -720,7 +720,7 @@ jobs:
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       - name: Install packaging tools
-        uses: taiki-e/install-action@a1df9120380005ebdc788c62449b841b205541dd # v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-deb,cargo-generate-rpm
 
@@ -795,21 +795,21 @@ jobs:
       # the packages unattested).
       - name: Attest build provenance
         if: inputs.enable-attestation && !inputs.dry-run
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/*.deb
             dist/*.rpm
 
       - name: Upload deb artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.bin-name }}-deb-${{ matrix.arch }}
           path: dist/*.deb
           if-no-files-found: error
 
       - name: Upload rpm artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.bin-name }}-rpm-${{ matrix.arch }}
           path: dist/*.rpm
@@ -828,7 +828,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -839,7 +839,7 @@ jobs:
       # the artifacts of `foo-bar`). Every file this workflow uploads starts
       # with `<bin-name>-v<version>-`.
       - name: Download this caller's artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           pattern: ${{ inputs.bin-name }}-*
@@ -898,7 +898,7 @@ jobs:
       # the artifacts of `foo-bar`). Every file this workflow uploads starts
       # with `<bin-name>-v<version>-`.
       - name: Download this caller's artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           pattern: ${{ inputs.bin-name }}-*
@@ -935,7 +935,7 @@ jobs:
       # the bin-name last so that a caller's own `<bin-name>-*` download of
       # the run's artifacts does not take the bundle in too.
       - name: Upload dry-run bundle
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dry-run-bundle-${{ inputs.bin-name }}
           path: artifacts/*
@@ -973,13 +973,13 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ${{ inputs.workspace-dir }}
 
@@ -1078,7 +1078,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -1255,7 +1255,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -1491,7 +1491,7 @@ jobs:
     # release — same non-blocking stance as winget.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -1635,7 +1635,7 @@ jobs:
         # aur-ssh-private-key's public counterpart must already have that
         # public key registered at https://aur.archlinux.org/account/ (SSH
         # Public Key field) before this can push.
-        uses: KSXGitHub/github-actions-deploy-aur@da03e160361ce01bf087e790b6ffd196d7dccff7 # v4.1.3
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
         with:
           pkgname: ${{ inputs.aur-package }}
           pkgbuild: ./PKGBUILD
@@ -1657,7 +1657,7 @@ jobs:
     # shouldn't fail a release that already succeeded on GitHub.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -1672,7 +1672,7 @@ jobs:
             exit 1
           fi
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           # uv only runs a tool here; the caller repos have no Python
           # dependency files, so the cache would never be invalidated.
@@ -1703,6 +1703,9 @@ jobs:
         # cargo-deb/cargo-generate-rpm package.
         env:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          # cloudsmith-cli 1.30+ sends crash reports to Sentry by default,
+          # also in CI; a release pipeline should not phone home.
+          CLOUDSMITH_NO_TELEMETRY: "1"
           CLOUDSMITH_REPO: ${{ inputs.cloudsmith-repo }}
         shell: bash
         run: |
@@ -1710,9 +1713,9 @@ jobs:
           shopt -s nullglob
           for f in dist/*.deb; do
             echo "Pushing $f to ${CLOUDSMITH_REPO}/any-distro/any-version..."
-            uvx --from cloudsmith-cli==1.19.0 cloudsmith push deb "${CLOUDSMITH_REPO}/any-distro/any-version" "$f"
+            uvx --from cloudsmith-cli==1.31.1 cloudsmith push deb "${CLOUDSMITH_REPO}/any-distro/any-version" "$f"
           done
           for f in dist/*.rpm; do
             echo "Pushing $f to ${CLOUDSMITH_REPO}/any-distro/any-version..."
-            uvx --from cloudsmith-cli==1.19.0 cloudsmith push rpm "${CLOUDSMITH_REPO}/any-distro/any-version" "$f"
+            uvx --from cloudsmith-cli==1.31.1 cloudsmith push rpm "${CLOUDSMITH_REPO}/any-distro/any-version" "$f"
           done
