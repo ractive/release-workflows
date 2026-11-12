@@ -127,11 +127,11 @@ requests a permission the caller didn't grant hard-fails immediately, even
 if the step that would need it is skipped at runtime. The attestation steps
 in `build` and `linux-packages` only need `id-token`/`attestations`
 conditionally (`enable-attestation` and not `dry-run`), so neither job can
-declare that requirement explicitly without
-breaking every caller that doesn't grant it — including `selftest.yml`, whose
-caller job only grants `contents: read`. Inheritance is the only shape that
-serves both a full production release and a read-only dry-run from the same
-job definition.
+declare that requirement explicitly without breaking every caller that
+doesn't grant it — including `selftest.yml`, whose caller jobs grant only
+`contents: write` (no `id-token`/`attestations`). Inheritance is the only
+shape that serves both a full production release and a dry run from the
+same job definition.
 
 If `enable-attestation` is `false`, `id-token`/`attestations` can be omitted
 from the caller's grant.
