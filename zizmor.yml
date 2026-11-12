@@ -25,7 +25,9 @@ rules:
       # release.yml. actionlint 1.7.12 (the latest release, also run by
       # ci.yml) rejects `$/` as an invalid reusable-workflow reference
       # (rhysd/actionlint#711, #760), so the two linters cannot both pass.
-      # selftest.yml only runs on push/pull_request, with no step before the
-      # call that could plant a different release.yml in the workspace.
-      # Switch to `$/` once actionlint accepts it.
-      - selftest.yml
+      # Both are job-level reusable-workflow calls, which GitHub resolves
+      # from the repository at the workflow run's own commit, not from a
+      # checked-out workspace, so `./` cannot be redirected here. Switch to
+      # `$/` once actionlint accepts it.
+      - selftest.yml:43
+      - selftest.yml:61
