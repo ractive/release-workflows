@@ -1,0 +1,24 @@
+# Dependabot version updates.
+#
+# Every update PR goes through ci.yml (actionlint, shellcheck, zizmor) and
+# selftest.yml, so the shared pipeline is exercised end to end before a bump
+# lands. Majors arrive as individual PRs; minor/patch updates are grouped.
+#
+# - github-actions: every third-party action in the reusable workflows is
+#   SHA-pinned with a `# vX.Y.Z` comment; Dependabot updates both. A merged
+#   bump only reaches callers once a new tag is cut and they move to it.
+# - Not covered: tools pinned inside `run:` steps (zizmor and cloudsmith-cli
+#   via `uvx --from <tool>==<version>`, komac via KOMAC_VERSION) and the
+#   testdata/fixture-cli crate, whose dependencies only exist to give the
+#   selftest something to build. Tools installed through
+#   taiki-e/install-action (cross, cargo-deny, ...) are unpinned and track
+#   their latest release.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        update-types: [minor, patch]
