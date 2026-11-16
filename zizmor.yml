@@ -31,3 +31,5 @@ rules:
       # `$/` once actionlint accepts it.
       - selftest.yml:43
       - selftest.yml:61
+      # The same for the CRX selftest's call of chrome-extension-publish.yml.
+      - selftest.yml:242

@@ -1,0 +1,7 @@
+{
+  "manifest_version": 3,
+  "name": "release-workflows fixture extension",
+  "version": "0.0.1",
+  "description": "Packed by selftest.yml to check chrome-extension-publish.yml's CRX against Chrome's.",
+  "background": { "service_worker": "background.js" }
+}
