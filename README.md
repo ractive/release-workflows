@@ -25,9 +25,10 @@ duplication is intentional; see the comment at the top of each file.
 | --- | --- | --- |
 | `.github/workflows/release.yml` | `workflow_call` | Full release pipeline: version check, security audit, cross-platform build, optional macOS signing and notarisation, optional SBOM/attestation/deb/rpm, GitHub release upload, crates.io, Homebrew, Scoop, winget. |
 | `.github/workflows/publish-crates.yml` | `workflow_call` | Standalone crates.io publish loop — the recovery path for when `release.yml`'s `crates-io` job fails after the GitHub release itself has already succeeded. |
+| `.github/workflows/chrome-extension-publish.yml` | `workflow_call` | Publishes a Chrome extension's store zip from a GitHub release to its Chrome Web Store item: checks the zip and its build provenance, signs a CRX with the publisher's key (Verified CRX uploads), uploads and submits it for review. See [Chrome extensions](#chrome-extensions-chrome-extension-publishyml). |
 | `.github/workflows/cloudsmith-republish.yml` | `workflow_call` | Standalone Cloudsmith publish — (re)pushes an existing release's `.deb`/`.rpm` assets. For failed cloudsmith jobs or repositories created/renamed after the release ran (release runs pin inputs at tag time). Inputs: `tag`, `cloudsmith-repo`. |
 | `.github/workflows/ci.yml` | `push` to `main`, `pull_request` | Lints this repo's own workflow files with `actionlint` and `zizmor`. |
-| `.github/workflows/selftest.yml` | `push` to `main`, `pull_request` | Calls `release.yml` (from this same repo, at the triggering commit) against the `testdata/fixture-cli` fixture crate in `dry-run` mode — end-to-end validation of the pipeline itself. See [Testing](#testing). |
+| `.github/workflows/selftest.yml` | `push` to `main`, `pull_request` | Calls `release.yml` (from this same repo, at the triggering commit) against the `testdata/fixture-cli` fixture crate in `dry-run` mode — end-to-end validation of the pipeline itself — and `chrome-extension-publish.yml`'s CRX packer against Chrome's. See [Testing](#testing). |
 
 ## `release.yml` inputs
 
@@ -86,6 +87,76 @@ expect.
 | --- | --- | --- | --- |
 | `publish-crates` | string | *(required)* | Comma-separated, dependency-ordered list of crates to publish. |
 | `ref` | string | `""` | Git ref (tag/branch/sha) to check out and publish from. Empty uses the triggering ref. |
+
+## Chrome extensions (`chrome-extension-publish.yml`)
+
+For a Chrome extension whose release workflow builds a store zip (no `key`
+in the manifest, no source maps) and attaches it to a GitHub release. The
+caller runs it after that release exists, on the release's tag; the job
+uploads only:
+
+- a zip whose manifest version is the tag's version (`tag-prefix` plus a
+  Chrome version);
+- with `attest-signer-workflow`, a zip whose build provenance verifies as
+  made by that workflow of the caller's repository for the tag
+  (`gh attestation verify --signer-workflow … --source-ref …`). The CRX wraps
+  exactly those bytes (the packer checks it), so the attested zip is what the
+  store gets;
+- with `sign-crx` (default), as a CRX3 signed with `CWS_CRX_PRIVATE_KEY`,
+  whose CRX id must be `signing-key-id`.
+
+Nothing third-party runs in the job that holds the keys: the CRX is packed by
+inline Python (standard library and `openssl`), the Chrome Web Store API v2
+is called with `curl`.
+
+| Input | Type | Default | Description |
+| --- | --- | --- | --- |
+| `tag` | string | *(required unless `dry-run`)* | The release tag; must be the run's own tag (`github.ref_name`). |
+| `tag-prefix` | string | `"v"` | What precedes the version in the tag, e.g. `extension-v`. |
+| `asset` | string | *(required unless `dry-run`)* | The release asset, `{version}` for the version: `sitegloss-{version}-store.zip`. |
+| `extension-id` | string | *(required unless `dry-run`)* | The store item id. |
+| `attest-signer-workflow` | string | `""` | E.g. `.github/workflows/release.yml`; empty skips the provenance check. The caller grants `attestations: read`. |
+| `allow-host-permissions` | boolean | `false` | Allow `host_permissions` (install-time host access) in the manifest. |
+| `sign-crx` | boolean | `true` | Upload a signed CRX; `false` uploads the zip (an item without Verified CRX uploads). |
+| `signing-key-id` | string | `""` | The CRX id of the signing key, 32 letters a–p; required with `sign-crx`. |
+| `submit` | boolean | `true` | Submit for review after the upload; `false` leaves a draft. |
+| `environment` | string | `"chrome-web-store"` | The caller's environment holding the secrets. |
+| `dry-run`, `dry-run-artifact` | boolean, string | `false`, `""` | Pack and verify the artifact's `store.zip` with its `key.pem` (and compare with its `chrome.crx`); no release, no store. For `selftest.yml`. |
+
+The job reads the caller's **environment** (not repository) secrets and
+variable directly; pass no `secrets:`. Give the environment required
+reviewers and a deployment rule for the release tags only:
+
+| Environment secret / variable | What |
+| --- | --- |
+| `CWS_CLIENT_ID`, `CWS_CLIENT_SECRET`, `CWS_REFRESH_TOKEN` | A Google OAuth client and refresh token with the `https://www.googleapis.com/auth/chromewebstore` scope (consent screen "In production", or the token expires after seven days). |
+| `CWS_CRX_PRIVATE_KEY` | With `sign-crx`: the RSA private key (PEM) whose public key the item has under Package → "Verified CRX uploads". Keep a copy outside GitHub and outside the Google account: losing it means a week with CWS support. |
+| `CWS_PUBLISHER_ID` (variable) | The publisher id from the dashboard. |
+
+A key and its CRX id:
+
+```sh
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out crx-key.pem
+openssl rsa -in crx-key.pem -pubout                     # for the dashboard
+openssl pkey -in crx-key.pem -pubout -outform DER | shasum -a 256 | head -c 32 | tr 0-9a-f a-p   # signing-key-id
+```
+
+Caller, as a job after the one that creates the release:
+
+```yaml
+  publish:
+    needs: release
+    uses: ractive/release-workflows/.github/workflows/chrome-extension-publish.yml@vX.Y.Z
+    permissions:
+      contents: read
+      attestations: read
+    with:
+      tag: ${{ github.ref_name }}
+      asset: sitegloss-{version}-store.zip
+      extension-id: ldmcfigcnobhnbaigehcaodheklibeon
+      attest-signer-workflow: .github/workflows/release.yml
+      signing-key-id: <the key's CRX id>
+```
 
 ## Secrets
 
@@ -583,6 +654,12 @@ binary carries only the linker's ad-hoc signature: the selftest passes no
 secrets, so this guards the "no Apple secrets, signing skipped" path that
 every release takes until the secrets exist (and every dry run without
 `macos-sign-dry-run`).
+
+The jobs `crx-chrome` and `crx-selftest` test `chrome-extension-publish.yml`'s
+CRX packer: Chrome (stable) packs `testdata/fixture-extension` with a
+throwaway key, and the reusable workflow in `dry-run` packs the zip inside
+Chrome's CRX with that key; the two files must be equal byte for byte. The
+upload and the submission are not exercised; a real release is their test.
 
 ### What's NOT covered by any of the above
 

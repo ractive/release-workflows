@@ -190,3 +190,59 @@ jobs:
           if compgen -G "bundles/dry-run-bundle-fixture-cli-two/*.deb" > /dev/null; then
             echo "ERROR: fixture-cli-two has packages but does not enable them" >&2; exit 1
           fi
+
+  # chrome-extension-publish.yml's CRX packer against Chrome's own: Chrome
+  # packs the fixture extension with a throwaway key; the dry run packs the
+  # zip inside Chrome's CRX with that key and must write the same bytes.
+  crx-chrome:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2.2.0
+        id: chrome
+        with:
+          chrome-version: stable
+
+      - name: Pack the fixture extension with Chrome
+        env:
+          CHROME: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          set -euo pipefail
+          mkdir crx
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out crx/key.pem
+          cp -r testdata/fixture-extension "$RUNNER_TEMP/ext"
+          "$CHROME" --headless=new --no-message-box --user-data-dir="$RUNNER_TEMP/profile" \
+            --pack-extension="$RUNNER_TEMP/ext" --pack-extension-key="$PWD/crx/key.pem" || true
+          test -s "$RUNNER_TEMP/ext.crx" || { echo "ERROR: Chrome wrote no CRX" >&2; exit 1; }
+          cp "$RUNNER_TEMP/ext.crx" crx/chrome.crx
+          # The zip is what follows the CRX3 header (magic, version, header size).
+          python3 -I - crx/chrome.crx crx/store.zip <<'PY'
+          import struct, sys
+          crx = open(sys.argv[1], "rb").read()
+          assert crx[:4] == b"Cr24" and struct.unpack("<I", crx[4:8])[0] == 3
+          size = struct.unpack("<I", crx[8:12])[0]
+          open(sys.argv[2], "wb").write(crx[12 + size:])
+          PY
+          unzip -l crx/store.zip
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: crx-fixture
+          path: crx/
+          if-no-files-found: error
+          retention-days: 1
+
+  crx-selftest:
+    needs: crx-chrome
+    uses: ./.github/workflows/chrome-extension-publish.yml
+    permissions:
+      contents: read
+    with:
+      dry-run: true
+      dry-run-artifact: crx-fixture
+      environment: selftest

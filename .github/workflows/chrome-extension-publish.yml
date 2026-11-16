@@ -1,0 +1,350 @@
+# Reusable: publish a Chrome extension's store zip from a GitHub release to its
+# Chrome Web Store item, as a CRX signed with the publisher's own key
+# ("Verified CRX uploads"), and submit it for review.
+#
+# One job, in the caller's environment (`environment`, default
+# chrome-web-store), which holds the credentials as environment secrets and
+# should have required reviewers and a tag-only deployment rule:
+#
+#   CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN   OAuth client and refresh
+#                                                         token with the
+#                                                         chromewebstore scope
+#   CWS_CRX_PRIVATE_KEY                                   the RSA key (PEM) whose
+#                                                         public key the item has
+#                                                         under "Verified CRX
+#                                                         uploads" (sign-crx)
+#   vars.CWS_PUBLISHER_ID                                 the dashboard's publisher id
+#
+# Nothing third-party runs in this job: no checkout, no package install, no
+# marketplace action. The CRX is packed by the Python below (standard library
+# and the openssl CLI), byte for byte what `chrome --pack-extension` writes for
+# the same zip and key; selftest.yml checks that against Chrome on every PR.
+# The Chrome Web Store API v2 is called with curl.
+#
+# Self-contained on purpose: a reusable workflow runs against the caller's
+# checkout, so a script of this repository could not be referenced (README,
+# "Why fully self-contained").
+
+name: Chrome extension publish
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "The release tag to publish (the caller's github.ref_name); unused in dry-run"
+        type: string
+        default: ""
+      tag-prefix:
+        description: "What precedes the version in the tag, e.g. v or extension-v"
+        type: string
+        default: "v"
+      asset:
+        description: "The release asset to publish, with {version} for the version, e.g. sitegloss-{version}-store.zip"
+        type: string
+        default: ""
+      extension-id:
+        description: "The Chrome Web Store item id (32 letters a-p)"
+        type: string
+        default: ""
+      attest-signer-workflow:
+        description: "If set, the zip's build provenance must verify as signed by this workflow of the caller's repository for the tag, e.g. .github/workflows/release.yml"
+        type: string
+        default: ""
+      allow-host-permissions:
+        description: "Allow host_permissions in the manifest (install-time host access); off by default"
+        type: boolean
+        default: false
+      sign-crx:
+        description: "Upload a CRX signed with CWS_CRX_PRIVATE_KEY (Verified CRX uploads); false uploads the zip"
+        type: boolean
+        default: true
+      signing-key-id:
+        description: "The CRX id of the signing key (32 letters a-p), so a wrong key fails before the upload; required with sign-crx"
+        type: string
+        default: ""
+      submit:
+        description: "Submit for review after the upload; false leaves a draft in the dashboard"
+        type: boolean
+        default: true
+      environment:
+        description: "The caller's environment with the store's secrets"
+        type: string
+        default: chrome-web-store
+      dry-run:
+        description: "Pack and verify only, from the artifact dry-run-artifact (store.zip, key.pem, optional chrome.crx to compare with); no release, no store"
+        type: boolean
+        default: false
+      dry-run-artifact:
+        description: "The artifact a dry run takes its zip and key from"
+        type: string
+        default: ""
+
+# No permissions block: the job takes the caller's grant (contents: read, and
+# attestations: read with attest-signer-workflow); see README, "Required
+# caller permissions".
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: The tag and the inputs
+        id: inputs
+        if: ${{ !inputs.dry-run }}
+        env:
+          TAG: ${{ inputs.tag }}
+          PREFIX: ${{ inputs.tag-prefix }}
+          ASSET: ${{ inputs.asset }}
+          EXTENSION_ID: ${{ inputs.extension-id }}
+          SIGN: ${{ inputs.sign-crx }}
+          SIGNING_KEY_ID: ${{ inputs.signing-key-id }}
+          PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+        run: |
+          set -euo pipefail
+          # Only a run on the release's own tag uploads that tag's zip.
+          test "$GITHUB_REF_TYPE" = tag && test "$GITHUB_REF_NAME" = "$TAG" \
+            || { echo "::error::this run is on $GITHUB_REF_TYPE $GITHUB_REF_NAME, not on the tag '$TAG'"; exit 1; }
+          case "$TAG" in "$PREFIX"*) ;; *) echo "::error::$TAG does not start with $PREFIX"; exit 1 ;; esac
+          version="${TAG#"$PREFIX"}"
+          # Chrome takes 1 to 4 dot-separated integers from 0 to 65535, no leading zeros.
+          if ! echo "$version" | grep -Eq '^(0|[1-9][0-9]{0,4})(\.(0|[1-9][0-9]{0,4})){0,3}$' \
+            || ! echo "$version" | awk -F. '{ for (i = 1; i <= NF; i++) if ($i > 65535) exit 1 }'; then
+            echo "::error::$TAG is not $PREFIX plus a Chrome extension version"; exit 1
+          fi
+          case "$ASSET" in *"{version}"*) ;; *) echo "::error::asset '$ASSET' has no {version}"; exit 1 ;; esac
+          echo "$EXTENSION_ID" | grep -Eq '^[a-p]{32}$' \
+            || { echo "::error::extension-id '$EXTENSION_ID' is not an item id"; exit 1; }
+          echo "$PUBLISHER_ID" | grep -Eq '^[A-Za-z0-9_-]+$' \
+            || { echo "::error::vars.CWS_PUBLISHER_ID is not set in the environment"; exit 1; }
+          if [ "$SIGN" = true ]; then
+            echo "$SIGNING_KEY_ID" | grep -Eq '^[a-p]{32}$' \
+              || { echo "::error::sign-crx needs signing-key-id, the signing key's CRX id"; exit 1; }
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset=${ASSET//\{version\}/$version}" >> "$GITHUB_OUTPUT"
+
+      - name: Download the release's store zip
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          ASSET: ${{ steps.inputs.outputs.asset }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET" --output store.zip
+          sha256sum store.zip
+
+      - name: Download the dry run's zip and key
+        if: ${{ inputs.dry-run }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.dry-run-artifact }}
+
+      - name: The zip is a store build of that version
+        env:
+          VERSION: ${{ steps.inputs.outputs.version }}
+          ALLOW_HOST_PERMISSIONS: ${{ inputs.allow-host-permissions }}
+        run: |
+          set -euo pipefail
+          manifest="$(unzip -p store.zip manifest.json)"
+          if [ -n "$VERSION" ]; then
+            test "$(jq -r .version <<<"$manifest")" = "$VERSION" \
+              || { echo "::error::the manifest's version is not $VERSION"; exit 1; }
+          fi
+          jq -e 'has("key") | not' <<<"$manifest" >/dev/null \
+            || { echo "::error::the manifest has a key: not a store build"; exit 1; }
+          if [ "$ALLOW_HOST_PERMISSIONS" != true ]; then
+            jq -e 'has("host_permissions") | not' <<<"$manifest" >/dev/null \
+              || { echo "::error::the manifest asks for host access at install (allow-host-permissions is off)"; exit 1; }
+          fi
+          # grep -c reads all of its input, so unzip never gets SIGPIPE.
+          maps="$(unzip -Z1 store.zip | grep -c '\.map$' || true)"
+          test "$maps" = 0 || { echo "::error::the zip has $maps source maps"; exit 1; }
+
+      - name: The zip's attestation verifies
+        if: ${{ !inputs.dry-run && inputs.attest-signer-workflow != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNER: ${{ inputs.attest-signer-workflow }}
+        run: |
+          set -euo pipefail
+          gh attestation verify store.zip --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/$SIGNER" --source-ref "$GITHUB_REF"
+
+      - name: Sign the CRX
+        if: ${{ inputs.sign-crx }}
+        env:
+          DRY_RUN: ${{ inputs.dry-run }}
+          CRX_PRIVATE_KEY: ${{ !inputs.dry-run && secrets.CWS_CRX_PRIVATE_KEY || '' }}
+          SIGNING_KEY_ID: ${{ inputs.signing-key-id }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/crx-key.pem"
+          trap 'rm -f "$key"' EXIT
+          if [ "$DRY_RUN" = true ]; then
+            cp key.pem "$key"
+          else
+            test -n "$CRX_PRIVATE_KEY" \
+              || { echo "::error::CWS_CRX_PRIVATE_KEY is not set in the environment"; exit 1; }
+            printf '%s\n' "$CRX_PRIVATE_KEY" > "$key"
+          fi
+          id="$(python3 -I - "$key" store.zip store.crx <<'PY'
+          """Pack a zip as a CRX3 signed with an RSA key, as chrome --pack-extension
+          does, read it back and verify its signature; print the CRX id of the key."""
+          import hashlib, os, struct, subprocess, sys, tempfile
+
+          def varint(n):
+              out = bytearray()
+              while True:
+                  b, n = n & 0x7F, n >> 7
+                  out.append(b | 0x80 if n else b)
+                  if not n:
+                      return bytes(out)
+
+          def field(number, data):
+              # Protocol buffers, wire type 2 (length-delimited).
+              return varint(number << 3 | 2) + varint(len(data)) + data
+
+          def read_varint(buf, i):
+              n = shift = 0
+              while True:
+                  b = buf[i]
+                  i += 1
+                  n |= (b & 0x7F) << shift
+                  shift += 7
+                  if not b & 0x80:
+                      return n, i
+
+          def fields(buf):
+              out, i = [], 0
+              while i < len(buf):
+                  tag, i = read_varint(buf, i)
+                  if tag & 7 != 2:
+                      raise SystemExit(f"unexpected wire type {tag & 7}")
+                  size, i = read_varint(buf, i)
+                  if i + size > len(buf):
+                      raise SystemExit("truncated field")
+                  out.append((tag >> 3, buf[i:i + size]))
+                  i += size
+              return out
+
+          def openssl(*args, data=None):
+              return subprocess.run(["openssl", *args], input=data,
+                                    capture_output=True, check=True).stdout
+
+          def signed_bytes(signed_data, archive):
+              return (b"CRX3 SignedData\x00" + struct.pack("<I", len(signed_data))
+                      + signed_data + archive)
+
+          def letters(crx_id):
+              # Chrome writes an id's hex digits as the letters a to p.
+              return "".join(chr(ord("a") + int(c, 16)) for c in crx_id.hex())
+
+          key, zip_path, out = sys.argv[1:4]
+          archive = open(zip_path, "rb").read()
+          if archive[:4] != b"PK\x03\x04":
+              raise SystemExit(f"{zip_path} is not a zip")
+          public_der = openssl("pkey", "-in", key, "-pubout", "-outform", "DER")
+          crx_id = hashlib.sha256(public_der).digest()[:16]
+          # CrxFileHeader: sha256_with_rsa = 2 (AsymmetricKeyProof: public_key = 1,
+          # signature = 2), signed_header_data = 10000 (SignedData: crx_id = 1).
+          signed_data = field(1, crx_id)
+          signature = openssl("dgst", "-sha256", "-sign", key,
+                              data=signed_bytes(signed_data, archive))
+          header = field(2, field(1, public_der) + field(2, signature)) + field(10000, signed_data)
+          crx = b"Cr24" + struct.pack("<II", 3, len(header)) + header + archive
+
+          # Read it back as a CRX3 and verify the signature with the public key.
+          if crx[:4] != b"Cr24" or struct.unpack("<I", crx[4:8])[0] != 3:
+              raise SystemExit("not a CRX3")
+          size = struct.unpack("<I", crx[8:12])[0]
+          parsed = fields(crx[12:12 + size])
+          proofs = [v for n, v in parsed if n == 2]
+          signed = [v for n, v in parsed if n == 10000]
+          if len(proofs) != 1 or len(signed) != 1 or crx[12 + size:] != archive:
+              raise SystemExit("unexpected CRX header")
+          proof = dict(fields(proofs[0]))
+          if proof.get(1) != public_der or dict(fields(signed[0])).get(1) != crx_id:
+              raise SystemExit("the CRX names another key")
+          with tempfile.TemporaryDirectory() as tmp:
+              pub, sig = os.path.join(tmp, "pub.der"), os.path.join(tmp, "sig")
+              open(pub, "wb").write(public_der)
+              open(sig, "wb").write(proof[2])
+              openssl("dgst", "-sha256", "-verify", pub, "-keyform", "DER",
+                      "-signature", sig, data=signed_bytes(signed[0], archive))
+          open(out, "wb").write(crx)
+          print(letters(crx_id))
+          PY
+          )"
+          echo "signing key: $id"
+          if [ -n "$SIGNING_KEY_ID" ]; then
+            test "$id" = "$SIGNING_KEY_ID" \
+              || { echo "::error::the signing key is $id, signing-key-id says $SIGNING_KEY_ID"; exit 1; }
+          fi
+          sha256sum store.crx
+          # A dry run with Chrome's own CRX of the same zip and key: equal bytes.
+          if [ "$DRY_RUN" = true ] && [ -f chrome.crx ]; then
+            cmp chrome.crx store.crx
+            echo "store.crx is byte for byte Chrome's chrome.crx"
+          fi
+
+      - name: Upload to the Chrome Web Store
+        if: ${{ !inputs.dry-run }}
+        env:
+          CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+          PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ inputs.extension-id }}
+          SIGN: ${{ inputs.sign-crx }}
+          SUBMIT: ${{ inputs.submit }}
+          VERSION: ${{ steps.inputs.outputs.version }}
+        run: |
+          set -euo pipefail
+          for name in CLIENT_ID CLIENT_SECRET REFRESH_TOKEN; do
+            test -n "${!name}" || { echo "::error::CWS_$name is not set in the environment"; exit 1; }
+          done
+          umask 077
+          auth="$RUNNER_TEMP/cws-auth"
+          trap 'rm -f "$auth" "$auth.json"' EXIT
+          # The access token stays in files and masked; curl reads the header
+          # from a file, so it is in no command line.
+          jq -n --arg id "$CLIENT_ID" --arg secret "$CLIENT_SECRET" --arg token "$REFRESH_TOKEN" \
+            '{client_id: $id, client_secret: $secret, refresh_token: $token, grant_type: "refresh_token"}' \
+            | curl -sS --fail-with-body -X POST https://oauth2.googleapis.com/token \
+                -H 'Content-Type: application/json' --data-binary @- > "$auth.json" \
+            || { echo "::error::no access token: $(jq -r '.error_description // .error // .' "$auth.json" 2>/dev/null)"; exit 1; }
+          token="$(jq -r .access_token "$auth.json")"
+          echo "::add-mask::$token"
+          printf 'Authorization: Bearer %s\n' "$token" > "$auth"
+          item="https://chromewebstore.googleapis.com/v2/publishers/$PUBLISHER_ID/items/$EXTENSION_ID"
+          upload="https://chromewebstore.googleapis.com/upload/v2/publishers/$PUBLISHER_ID/items/$EXTENSION_ID:upload"
+          file=store.zip
+          if [ "$SIGN" = true ]; then file=store.crx; fi
+
+          echo "uploading $file ($VERSION)"
+          response="$(curl -sS -X POST "$upload" -H @"$auth" \
+            -H 'X-Goog-Upload-Protocol: raw' -H "X-Goog-Upload-File-Name: extension.${file##*.}" \
+            --data-binary @"$file")"
+          jq . <<<"$response" || printf '%s\n' "$response"
+          state="$(jq -r '.uploadState // empty' <<<"$response")"
+          for _ in $(seq 1 60); do
+            [ "$state" = IN_PROGRESS ] || break
+            sleep 5
+            state="$(curl -sS "$item:fetchStatus" -H @"$auth" | jq -r '.lastAsyncUploadState // empty')"
+          done
+          test "$state" = SUCCEEDED \
+            || { echo "::error::the upload ended in '$state'"; exit 1; }
+
+          if [ "$SUBMIT" = true ]; then
+            response="$(curl -sS -X POST "$item:publish" -H @"$auth" \
+              -H 'Content-Type: application/json' --data '{"publishType":"DEFAULT_PUBLISH"}')"
+            jq . <<<"$response" || printf '%s\n' "$response"
+            jq -e '.state and (.error | not)' <<<"$response" >/dev/null \
+              || { echo "::error::not submitted for review"; exit 1; }
+            echo "submitted $VERSION for review: $(jq -r .state <<<"$response")" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "uploaded $VERSION as a draft; submit it in the dashboard" >> "$GITHUB_STEP_SUMMARY"
+          fi
