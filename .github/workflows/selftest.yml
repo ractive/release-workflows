@@ -216,7 +216,9 @@ jobs:
           mkdir crx
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out crx/key.pem
           cp -r testdata/fixture-extension "$RUNNER_TEMP/ext"
-          "$CHROME" --headless=new --no-message-box --user-data-dir="$RUNNER_TEMP/profile" \
+          # --no-sandbox: Ubuntu's AppArmor leaves Chrome no usable sandbox on
+          # the runner; it only packs the local fixture, no web content.
+          "$CHROME" --headless=new --no-sandbox --no-message-box --user-data-dir="$RUNNER_TEMP/profile" \
             --pack-extension="$RUNNER_TEMP/ext" --pack-extension-key="$PWD/crx/key.pem" || true
           test -s "$RUNNER_TEMP/ext.crx" || { echo "ERROR: Chrome wrote no CRX" >&2; exit 1; }
           cp "$RUNNER_TEMP/ext.crx" crx/chrome.crx
