@@ -51,7 +51,7 @@ on:
         type: string
         default: ""
       allow-host-permissions:
-        description: "Allow host_permissions in the manifest (install-time host access); off by default"
+        description: "Allow install-time host access in the manifest (host_permissions, content_scripts matches, URL patterns in permissions); off by default"
         type: boolean
         default: false
       sign-crx:
@@ -88,9 +88,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: ${{ inputs.environment }}
-    # One upload at a time per repository: a second waits, none is cancelled.
+    # One upload at a time per repository: a second run waits. GitHub keeps one
+    # pending run per group, so a third replaces (cancels) the one waiting;
+    # extension-publish by hand repeats it. A dry run touches no store and
+    # gets a group of its own, so CI runs never queue behind one another.
     concurrency:
-      group: chrome-web-store-${{ github.repository }}
+      group: ${{ inputs.dry-run && format('crx-dry-run-{0}-{1}', github.run_id, github.run_attempt) || format('chrome-web-store-{0}', github.repository) }}
       cancel-in-progress: false
     steps:
       - name: The tag and the inputs
@@ -159,8 +162,13 @@ jobs:
           jq -e 'has("key") | not' <<<"$manifest" >/dev/null \
             || { echo "::error::the manifest has a key: not a store build"; exit 1; }
           if [ "$ALLOW_HOST_PERMISSIONS" != true ]; then
-            jq -e 'has("host_permissions") | not' <<<"$manifest" >/dev/null \
-              || { echo "::error::the manifest asks for host access at install (allow-host-permissions is off)"; exit 1; }
+            # Install-time host access: host_permissions, the sites content
+            # scripts run on, and (Manifest V2) URL patterns in permissions.
+            hosts="$(jq -c '[(.host_permissions // [])[],
+                (.content_scripts // [])[].matches[]?,
+                ((.permissions // [])[] | select(type == "string" and test("://|^<all_urls>$")))]' <<<"$manifest")"
+            test "$hosts" = '[]' \
+              || { echo "::error::the manifest asks for host access at install: $hosts (allow-host-permissions is off)"; exit 1; }
           fi
           # grep -c reads all of its input, so unzip never gets SIGPIPE.
           maps="$(unzip -Z1 store.zip | grep -c '\.map$' || true)"
@@ -331,13 +339,16 @@ jobs:
           echo "uploading $file ($VERSION)"
           response="$(curl -sS -X POST "$upload" -H @"$auth" \
             -H 'X-Goog-Upload-Protocol: raw' -H "X-Goog-Upload-File-Name: extension.${file##*.}" \
-            --data-binary @"$file")"
+            -H 'Content-Type: application/octet-stream' --data-binary @"$file")"
           jq . <<<"$response" || printf '%s\n' "$response"
           state="$(jq -r '.uploadState // empty' <<<"$response")"
           for _ in $(seq 1 60); do
             [ "$state" = IN_PROGRESS ] || break
             sleep 5
-            state="$(curl -sS "$item:fetchStatus" -H @"$auth" | jq -r '.lastAsyncUploadState // empty')"
+            # A failed poll (network, a 5xx page) is asked again next round;
+            # only the final state decides.
+            state="$(curl -sS --fail --retry 3 --retry-all-errors "$item:fetchStatus" -H @"$auth" \
+              | jq -r '.lastAsyncUploadState // empty' || echo IN_PROGRESS)"
           done
           test "$state" = SUCCEEDED \
             || { echo "::error::the upload ended in '$state'"; exit 1; }

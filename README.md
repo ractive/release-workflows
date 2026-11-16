@@ -116,7 +116,7 @@ is called with `curl`.
 | `asset` | string | *(required unless `dry-run`)* | The release asset, `{version}` for the version: `sitegloss-{version}-store.zip`. |
 | `extension-id` | string | *(required unless `dry-run`)* | The store item id. |
 | `attest-signer-workflow` | string | `""` | E.g. `.github/workflows/release.yml`; empty skips the provenance check. The caller grants `attestations: read`. |
-| `allow-host-permissions` | boolean | `false` | Allow `host_permissions` (install-time host access) in the manifest. |
+| `allow-host-permissions` | boolean | `false` | Allow install-time host access in the manifest: `host_permissions`, `content_scripts` `matches`, URL patterns in `permissions`. |
 | `sign-crx` | boolean | `true` | Upload a signed CRX; `false` uploads the zip (an item without Verified CRX uploads). |
 | `signing-key-id` | string | `""` | The CRX id of the signing key, 32 letters a–p; required with `sign-crx`. |
 | `submit` | boolean | `true` | Submit for review after the upload; `false` leaves a draft. |
