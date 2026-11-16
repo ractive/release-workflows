@@ -88,6 +88,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: ${{ inputs.environment }}
+    # One upload at a time per repository: a second waits, none is cancelled.
+    concurrency:
+      group: chrome-web-store-${{ github.repository }}
+      cancel-in-progress: false
     steps:
       - name: The tag and the inputs
         id: inputs
