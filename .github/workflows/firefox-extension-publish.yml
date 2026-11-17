@@ -86,7 +86,9 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Above the sum of the limits below (two GETs of 200 s, two POSTs of
+    # 240 s, 10 minutes of validation), so the job's own errors end it.
+    timeout-minutes: 30
     environment: ${{ inputs.environment }}
     # One upload at a time per repository (see chrome-extension-publish.yml);
     # a dry run touches no store and gets a group of its own.
@@ -277,33 +279,42 @@ jobs:
           PY
           }
 
-          # One request with a fresh token: code is the HTTP status (000 for
-          # no answer), AMO's answer is in $body. The token stays in a file,
-          # so it is in no command line.
+          # One request with a fresh token: code is the HTTP status, AMO's
+          # answer is in $body. 000 is no answer or one that broke off (curl
+          # failed, whatever status it had read), with $body emptied, so no
+          # half an answer and no earlier request's is read. The token stays
+          # in a file, so it is in no command line. $limit is the request's
+          # time limit in seconds: 240 for the two POSTs, 30 for a GET.
+          limit=240
           call() {
             local t
             t="$(token)"
             echo "::add-mask::$t"
             printf 'Authorization: JWT %s\n' "$t" > "$auth"
-            code="$(curl -sS --connect-timeout 20 --max-time 240 -o "$body" -w '%{http_code}' \
-              -H @"$auth" -H 'Accept: application/json' "$@")" || code="${code:-000}"
+            : > "$body"
+            code="$(curl -sS --connect-timeout 20 --max-time "$limit" -o "$body" -w '%{http_code}' \
+              -H @"$auth" -H 'Accept: application/json' "$@")" || { code=000; : > "$body"; }
           }
 
-          # A GET, asked again after a network error, 408, 429 or 5xx (up
-          # to 5 times, 10 s apart); any other answer is the caller's.
+          # A GET, asked again after no answer, 408, 429 or 5xx (5 times in
+          # all, 10 s apart, 200 s at most); any other answer is the
+          # caller's, and so is the last one.
           get() {
-            for _ in 1 2 3 4 5; do
+            local limit=30 try
+            for try in 1 2 3 4 5; do
               call "$1"
               case "$code" in
-                000|408|429|5??) echo "GET answered HTTP $code; asking again"; sleep 10 ;;
+                000|408|429|5??) ;;
                 *) return 0 ;;
               esac
+              if [ "$try" != 5 ]; then echo "GET answered HTTP $code; asking again"; sleep 10; fi
             done
           }
 
           # AMO's error from the last answer: its code and detail, or each
           # field's messages, or the start of a non-JSON page.
           reason() {
+            test -s "$body" || { echo "no answer"; return 0; }
             jq -r 'if type == "object" then
                 if has("detail") then [.code, .detail] | map(select(. != null)) | map(tostring) | join(": ")
                 else to_entries | map("\(.key): \(.value | if type == "array" then map(tostring) | join(" ") else tostring end)") | join("; ")
@@ -311,19 +322,29 @@ jobs:
               else tostring end' "$body" 2>/dev/null || head -c 500 "$body"
           }
 
-          # The add-on: our credentials, and an add-on we may add versions to.
+          # The add-on: our credentials are valid and the add-on is there.
+          # Any valid key reads a public add-on, so this does not show that
+          # the key's account is an author: the version's POST does (403).
           get "$addon/"
           test "$code" = 200 \
             || { echo "::error::the add-on $ADDON_ID answered HTTP $code: $(reason) (it must exist on AMO, created by hand, with the key's account as an author)"; exit 1; }
 
-          # The version number: AMO never takes one twice. If it is there, a
-          # rerun after a submission that went through: nothing to upload.
+          # The version number: AMO never takes one twice. If it is there as
+          # a listed version awaiting review or approved, a rerun after a
+          # submission that went through: nothing to upload. If it is there
+          # in any other way (unlisted, signed by hand; a rejected file), the
+          # number is spent and this release is not on AMO: an error.
           get "$addon/versions/v$VERSION/"
           case "$code" in
             200)
-              status="$(jq -r '"\(.channel), file \(.file.status)"' "$body")"
-              echo "::notice::$ADDON_ID $VERSION is already on AMO ($status); nothing uploaded."
-              echo "$VERSION was already on AMO ($status); nothing uploaded" >> "$GITHUB_STEP_SUMMARY"
+              channel="$(jq -r '.channel' "$body")"
+              status="$(jq -r '.file.status' "$body")"
+              case "$channel/$status" in
+                listed/unreviewed|listed/public) ;;
+                *) echo "::error::AMO has $ADDON_ID $VERSION already, as $channel with file status '$status', not as a listed version awaiting review or approved. AMO never takes a number twice: release a higher version."; exit 1 ;;
+              esac
+              echo "::notice::$ADDON_ID $VERSION is already on AMO ($channel, file $status); nothing uploaded."
+              echo "$VERSION was already on AMO ($channel, file $status); nothing uploaded" >> "$GITHUB_STEP_SUMMARY"
               exit 0 ;;
             404) ;;
             *) echo "::error::looking up $VERSION answered HTTP $code: $(reason)"; exit 1 ;;
@@ -336,10 +357,13 @@ jobs:
           test -n "$uuid" || { echo "::error::the upload's answer has no uuid"; exit 1; }
 
           # AMO's validator: processed within seconds to minutes; asked every
-          # 10 s, at most 10 minutes. A network error, 408, 429 or 5xx is asked
-          # again next round; any other HTTP error ends it at once.
+          # 10 s until 10 minutes have passed (each request 30 s at most). No
+          # answer, 408, 429 or 5xx is asked again next round; any other HTTP
+          # error ends it at once.
           processed=false
-          for _ in $(seq 1 60); do
+          limit=30
+          deadline=$((SECONDS + 600))
+          while [ "$SECONDS" -lt "$deadline" ]; do
             call "$AMO_API/addons/upload/$uuid/"
             case "$code" in
               200) processed="$(jq -r '.processed' "$body")"
@@ -349,6 +373,7 @@ jobs:
             esac
             sleep 10
           done
+          limit=240
           test "$processed" = true || { echo "::error::the validation of upload $uuid did not end in 10 minutes"; exit 1; }
           jq -r '.validation // {} | "validation: \(.errors // 0) errors, \(.warnings // 0) warnings, \(.notices // 0) notices",
             ((.messages // [])[] | "  \(.type): \(.message)\(if .file then " (\(.file)\(if .line then ":\(.line)" else "" end))" else "" end)")' "$body"
@@ -367,6 +392,7 @@ jobs:
           call -X POST "$addon/versions/" "${form[@]}"
           case "$code" in
             201) ;;
+            401|403) echo "::error::creating the version answered HTTP $code: $(reason) (the key's account must be an author of $ADDON_ID)"; exit 1 ;;
             409) echo "::error::AMO has $VERSION already (made since the check, or deleted before: a number is never taken twice): $(reason)"; exit 1 ;;
             *) echo "::error::creating the version answered HTTP $code, not 201: $(reason)"; exit 1 ;;
           esac

@@ -228,22 +228,28 @@ version itself; there is no draft: a version once made is submitted.
 Then, with AMO's API v5 and `curl`, each request with a JWT of its own
 (HS256, five minutes at most, AMO's limit):
 
-1. `GET /api/v5/addons/addon/<id>/` — the credentials, and an add-on the key's
-   account is an author of; the id percent-encoded (`sitegloss%40ractive.ch`).
-2. `GET …/versions/v<version>/` — if AMO has this version number already
-   (a rerun after a submission that went through), the job ends there,
-   successfully, with a notice: AMO never takes a number twice.
+1. `GET /api/v5/addons/addon/<id>/` — the credentials are valid and the
+   add-on exists; the id percent-encoded (`sitegloss%40ractive.ch`). Any valid
+   key reads a public add-on, so whether the key's account is an author shows
+   only in step 4 (403).
+2. `GET …/versions/v<version>/` — AMO never takes a number twice. If it has
+   this one as a listed version awaiting review or approved (a rerun after a
+   submission that went through), the job ends there, successfully, with a
+   notice. If it has it in any other way (unlisted, as after a
+   `web-ext sign` by hand, or with a rejected file), the job fails: the
+   number is spent and the release needs a higher one.
 3. `POST /api/v5/addons/upload/` (multipart: the zip, `channel=listed`), then
    `GET /api/v5/addons/upload/<uuid>/` every 10 s until AMO's validator has
-   processed it (at most 10 minutes); its messages are shown, and an invalid
-   upload ends the job.
+   processed it (until 10 minutes have passed); its messages are shown, and
+   an invalid upload ends the job.
 4. `POST …/versions/` (multipart: `upload`, `approval_notes`, `source`) — the
    version and its source in one request, so no version is left without its
    source. Compatibility comes from the manifest, the licence from the
    previous version.
 
-An HTTP error ends the job at once with AMO's answer; only a network error,
-408, 429 or 5xx on a `GET` is asked again.
+An HTTP error ends the job at once with AMO's answer; only no answer (a
+network error, or an answer that broke off), 408, 429 or 5xx on a `GET` is
+asked again (5 times in all, 10 s apart). A `GET` has 30 s, a `POST` 240 s.
 
 | Input | Type | Default | What |
 | --- | --- | --- | --- |
@@ -872,8 +878,9 @@ The job `edge-selftest` runs `edge-extension-publish.yml` in `dry-run` on the
 same zip: its checks, not the Edge Add-ons API.
 The jobs `amo-fixture` and `firefox-selftest` run `firefox-extension-publish.yml`
 in `dry-run` on a zip of `testdata/fixture-extension-firefox` (a gecko id,
-checked against `addon-id`) and a source archive of it: its checks, not
-AMO's API.
+checked against `addon-id`) and a source archive of it: its checks of the zip
+and the archive, not those of the tag and the inputs (so not the version
+either), and not AMO's API.
 
 ### 4. setup-selftest.yml — real installs with setup/action.yml
 

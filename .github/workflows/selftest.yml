@@ -262,9 +262,9 @@ jobs:
       environment: selftest
 
   # firefox-extension-publish.yml's checks on a Firefox fixture: the store zip
-  # (version, gecko id against addon-id, no key, no host access, no source
-  # maps) and the source archive (one AMO opens). A dry run stops before
-  # AMO's API: the upload and the version need a real add-on.
+  # (gecko id against addon-id, no key, no host access, no source maps) and
+  # the source archive (one AMO opens). A dry run has no tag, so no version to
+  # compare, and stops before AMO's API, which needs a real add-on.
   amo-fixture:
     runs-on: ubuntu-latest
     permissions:
