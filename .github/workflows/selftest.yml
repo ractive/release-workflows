@@ -248,3 +248,15 @@ jobs:
       dry-run: true
       dry-run-artifact: crx-fixture
       environment: selftest
+
+  # edge-extension-publish.yml's checks on the same fixture zip (a dry run
+  # stops before the API: the upload and the submission need a real item).
+  edge-selftest:
+    needs: crx-chrome
+    uses: ./.github/workflows/edge-extension-publish.yml
+    permissions:
+      contents: read
+    with:
+      dry-run: true
+      dry-run-artifact: crx-fixture
+      environment: selftest

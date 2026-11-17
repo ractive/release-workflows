@@ -26,9 +26,10 @@ duplication is intentional; see the comment at the top of each file.
 | `.github/workflows/release.yml` | `workflow_call` | Full release pipeline: version check, security audit, cross-platform build, optional macOS signing and notarisation, optional SBOM/attestation/deb/rpm, GitHub release upload, crates.io, Homebrew, Scoop, winget. |
 | `.github/workflows/publish-crates.yml` | `workflow_call` | Standalone crates.io publish loop — the recovery path for when `release.yml`'s `crates-io` job fails after the GitHub release itself has already succeeded. |
 | `.github/workflows/chrome-extension-publish.yml` | `workflow_call` | Publishes a Chrome extension's store zip from a GitHub release to its Chrome Web Store item: checks the zip and its build provenance, signs a CRX with the publisher's key (Verified CRX uploads), uploads and submits it for review. See [Chrome extensions](#chrome-extensions-chrome-extension-publishyml). |
+| `.github/workflows/edge-extension-publish.yml` | `workflow_call` | Publishes a Chromium extension's store zip from a GitHub release to its Microsoft Edge Add-ons item: the same checks of the zip and its build provenance, then the upload and the submission for certification through the Edge Add-ons API v1.1. See [Edge extensions](#edge-extensions-edge-extension-publishyml). |
 | `.github/workflows/cloudsmith-republish.yml` | `workflow_call` | Standalone Cloudsmith publish — (re)pushes an existing release's `.deb`/`.rpm` assets. For failed cloudsmith jobs or repositories created/renamed after the release ran (release runs pin inputs at tag time). Inputs: `tag`, `cloudsmith-repo`. |
 | `.github/workflows/ci.yml` | `push` to `main`, `pull_request` | Lints this repo's own workflow files with `actionlint` and `zizmor`. |
-| `.github/workflows/selftest.yml` | `push` to `main`, `pull_request` | Calls `release.yml` (from this same repo, at the triggering commit) against the `testdata/fixture-cli` fixture crate in `dry-run` mode — end-to-end validation of the pipeline itself — and `chrome-extension-publish.yml`'s CRX packer against Chrome's. See [Testing](#testing). |
+| `.github/workflows/selftest.yml` | `push` to `main`, `pull_request` | Calls `release.yml` (from this same repo, at the triggering commit) against the `testdata/fixture-cli` fixture crate in `dry-run` mode — end-to-end validation of the pipeline itself — `chrome-extension-publish.yml`'s CRX packer against Chrome's, and `edge-extension-publish.yml`'s checks in dry-run on the same zip. See [Testing](#testing). |
 
 ## `release.yml` inputs
 
@@ -161,6 +162,53 @@ Caller, as a job after the one that creates the release:
       extension-id: ldmcfigcnobhnbaigehcaodheklibeon
       attest-signer-workflow: .github/workflows/release.yml
       signing-key-id: <the key's CRX id>
+```
+
+## Edge extensions (`edge-extension-publish.yml`)
+
+Publishes the same store zip to an existing Microsoft Edge Add-ons item and
+submits it for certification. The checks before the upload are
+`chrome-extension-publish.yml`'s (the run is on the tag, the manifest has its
+version, no `key`, no install-time host access, no source maps, the
+attestation verifies). Edge takes the zip as it is: no CRX, no signed uploads.
+The API (v1.1) updates items only; create the item in Partner Center first.
+
+| Input | Type | Default | What |
+| --- | --- | --- | --- |
+| `tag`, `tag-prefix`, `asset`, `attest-signer-workflow`, `allow-host-permissions` | | | As in `chrome-extension-publish.yml`. |
+| `product-id` | string | `""` | The item's Product ID, a GUID (Extension overview → Extension identity). |
+| `notes` | string | `""` | Notes for certification (at most 2000 characters); empty sends a line naming the release. |
+| `submit` | boolean | `true` | Submit after the upload; `false` leaves the package in the draft. |
+| `environment` | string | `"edge-add-ons"` | The caller's environment holding the secrets. |
+| `dry-run`, `dry-run-artifact` | boolean, string | `false`, `""` | Check the artifact's `store.zip` only; no release, no store. For `selftest.yml`. |
+
+Environment secrets (pass `secrets: inherit`, as for Chrome), from Partner
+Center → Microsoft Edge → **Publish API** (enable the new experience, then
+"Create API credentials"):
+
+| Environment secret | What |
+| --- | --- |
+| `EDGE_CLIENT_ID` | The Client ID. |
+| `EDGE_API_KEY` | An API key. Keys have an expiry date, shown on that page; make a new one there in time. |
+
+A version still in certification makes the next submission fail with
+`InProgressSubmission`; run the publish again by hand after it.
+
+Caller, after the job that creates the release:
+
+```yaml
+  publish-edge:
+    needs: release
+    uses: ractive/release-workflows/.github/workflows/edge-extension-publish.yml@vX.Y.Z
+    secrets: inherit
+    permissions:
+      contents: read
+      attestations: read
+    with:
+      tag: ${{ github.ref_name }}
+      asset: sitegloss-{version}-store.zip
+      product-id: <the item's Product ID>
+      attest-signer-workflow: .github/workflows/release.yml
 ```
 
 ## Secrets
@@ -665,6 +713,8 @@ CRX packer: Chrome (stable) packs `testdata/fixture-extension` with a
 throwaway key, and the reusable workflow in `dry-run` packs the zip inside
 Chrome's CRX with that key; the two files must be equal byte for byte. The
 upload and the submission are not exercised; a real release is their test.
+The job `edge-selftest` runs `edge-extension-publish.yml` in `dry-run` on the
+same zip: its checks, not the Edge Add-ons API.
 
 ### What's NOT covered by any of the above
 
