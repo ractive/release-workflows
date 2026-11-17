@@ -29,8 +29,10 @@ duplication is intentional; see the comment at the top of each file.
 | `.github/workflows/edge-extension-publish.yml` | `workflow_call` | Publishes a Chromium extension's store zip from a GitHub release to its Microsoft Edge Add-ons item: the same checks of the zip and its build provenance, then the upload and the submission for certification through the Edge Add-ons API v1.1. See [Edge extensions](#edge-extensions-edge-extension-publishyml). |
 | `.github/workflows/firefox-extension-publish.yml` | `workflow_call` | Publishes a Firefox extension's store zip from a GitHub release to its add-on on addons.mozilla.org: the same checks of the zip and its build provenance plus the manifest's gecko id, then the upload, AMO's validation and a new listed version with the release's source archive, submitted for review, through AMO's API v5. See [Firefox extensions](#firefox-extensions-firefox-extension-publishyml). |
 | `.github/workflows/cloudsmith-republish.yml` | `workflow_call` | Standalone Cloudsmith publish — (re)pushes an existing release's `.deb`/`.rpm` assets. For failed cloudsmith jobs or repositories created/renamed after the release ran (release runs pin inputs at tag time). Inputs: `tag`, `cloudsmith-repo`. |
-| `.github/workflows/ci.yml` | `push` to `main`, `pull_request` | Lints this repo's own workflow files with `actionlint` and `zizmor`. |
+| `setup/action.yml` | composite action (`uses: ractive/release-workflows/setup@<sha>`) | Installs a binary from a `release.yml`-built release into a job after its `SHA256SUMS` and attestation checks, and adds it to `PATH`. See [Installing a release binary](#installing-a-release-binary-setupactionyml). |
+| `.github/workflows/ci.yml` | `push` to `main`, `pull_request` | Lints this repo's own workflow files with `actionlint` and `zizmor`, and `setup/action.yml` with `zizmor` and `shellcheck`. |
 | `.github/workflows/selftest.yml` | `push` to `main`, `pull_request` | Calls `release.yml` (from this same repo, at the triggering commit) against the `testdata/fixture-cli` fixture crate in `dry-run` mode — end-to-end validation of the pipeline itself — `chrome-extension-publish.yml`'s CRX packer against Chrome's, `edge-extension-publish.yml`'s checks in dry-run on the same zip, and `firefox-extension-publish.yml`'s on a Firefox fixture. See [Testing](#testing). |
+| `.github/workflows/setup-selftest.yml` | `push` to `main`, `pull_request`, `workflow_dispatch` | Installs real hyalo and ff-rdp releases with `setup/action.yml` on Linux x64/arm64, macOS and Windows. See [Testing](#testing). |
 
 ## `release.yml` inputs
 
@@ -299,6 +301,70 @@ Caller, after the job that creates the release:
       addon-id: sitegloss@ractive.ch
       attest-signer-workflow: .github/workflows/release.yml
 ```
+
+## Installing a release binary (`setup/action.yml`)
+
+A composite action that installs a binary from a release built by
+`release.yml` into a job, for the CI of other repositories:
+`uses: ractive/release-workflows/setup@<sha> # vX.Y.Z`. It is the shared
+part of [setup-hyalo](https://github.com/ractive/setup-hyalo) and
+[setup-ff-rdp](https://github.com/ractive/setup-ff-rdp); those wrappers
+name the repository and its exemptions, so their callers only pick a version.
+A composite action runs from this repository at the pinned ref, not from the
+caller's checkout, so [the self-containment rule](#why-fully-self-contained)
+for the reusable workflows does not apply to it.
+
+For the runner's OS and CPU it picks a target (Linux: `<arch>-unknown-linux-gnu`,
+or `<arch>-unknown-linux-musl` when the release's `SHA256SUMS` lists no gnu
+build; macOS: `<arch>-apple-darwin`; Windows: `<arch>-pc-windows-msvc`, a zip),
+resolves `latest` through the API, downloads `<bin>-<tag>-<target>.tar.gz`
+(`.zip`), checks it against the release's `SHA256SUMS`, verifies its
+build-provenance attestation, extracts it into the runner's tool cache and
+adds that directory to `PATH`. The attestation check is
+
+```sh
+gh attestation verify <archive> --repo <repo> --source-ref refs/tags/<tag> \
+  --signer-workflow ractive/release-workflows/.github/workflows/release.yml \
+  --deny-self-hosted-runners
+```
+
+`--signer-workflow` is needed because the certificate names this repo's
+`release.yml`, not the app repo's; `--source-ref` binds the archive to the tag,
+so a genuine archive of an older release swapped into this one fails. A
+missing or failing attestation fails the step unless the release or target
+is exempted below. Inputs reach the script through `env:` only, and the
+script runs on the bash 3.2 of macOS runners.
+
+| Input | Default | What |
+| --- | --- | --- |
+| `repo` | (required) | The repository, `owner/name`. |
+| `bin` | the name part of `repo` | The binary in the archive, without `.exe`. |
+| `version` | `latest` | `latest` or a tag `vX.Y.Z`. |
+| `github-token` | `${{ github.token }}` | For the API calls and the attestation fetch. |
+| `verify-attestation` | `true` | `false` skips the attestation check (runners without `gh`); `SHA256SUMS` alone cannot detect replaced assets. |
+| `attested-from` | `""` | First release with attestations. An older pinned release installs after `SHA256SUMS` only, with a warning; `latest` resolving to one fails. Empty: every release must verify. |
+| `unattested-targets` | `""` | Space-separated targets with no attestation up to `unattested-through`; those install after `SHA256SUMS` only, with a warning. List only targets the action picks: never a musl target whose arch has a gnu build, since the gnu/musl choice reads `SHA256SUMS`, which whoever can replace assets can edit. |
+| `unattested-through` | `""` | The last release `unattested-targets` covers; newer releases must verify. Required with `unattested-targets`. |
+
+| Output | What |
+| --- | --- |
+| `version` | The tag installed. |
+| `provenance` | `verified`, `exempt` (an exempted release or target, with a warning) or `disabled` (`verify-attestation: false`). |
+
+A tool-cache entry is reused within a job only if its recorded provenance
+meets what the run requires; otherwise it is downloaded and verified again.
+
+```yaml
+- uses: ractive/release-workflows/setup@<full commit sha> # v0.8.0
+  id: tool
+  with:
+    repo: ractive/ff-rdp
+    version: v0.5.0
+- run: ff-rdp --version
+```
+
+Pin it by full commit SHA with the tag in a comment, like any third-party
+action. `setup-selftest.yml` runs it on every PR (see [Testing](#testing)).
 
 ## Secrets
 
@@ -729,7 +795,7 @@ sudo dnf install <bin-name>   # or yum / zypper
 
 ## Testing
 
-This repo tests itself at three layers, each catching a different class of
+This repo tests itself at four layers, each catching a different class of
 problem before it reaches an app repo's actual release:
 
 ### 1. actionlint — syntax and shell correctness
@@ -808,6 +874,24 @@ The jobs `amo-fixture` and `firefox-selftest` run `firefox-extension-publish.yml
 in `dry-run` on a zip of `testdata/fixture-extension-firefox` (a gecko id,
 checked against `addon-id`) and a source archive of it: its checks, not
 AMO's API.
+
+### 4. setup-selftest.yml — real installs with setup/action.yml
+
+`setup-selftest.yml` runs `setup/action.yml` from the checkout
+(`uses: ./setup`) on `ubuntu-latest`, `ubuntu-24.04-arm`, `macos-latest` and
+`windows-latest`, for `ractive/hyalo` and `ractive/ff-rdp`, each at `latest`
+and at one pinned tag (hyalo v0.18.0, ff-rdp v0.4.4) with the exemption
+values setup-hyalo and setup-ff-rdp pass. Each job runs `<bin> --version`,
+checks the installed target (on arm64 Linux, hyalo's gnu build and ff-rdp's
+musl fallback, as ff-rdp ships no aarch64 gnu build) and the `provenance`
+output: `exempt` only for the pinned release on arm64 Linux, `verified`
+everywhere else. A second install must hit the tool cache (a file planted
+in the entry survives) with the same provenance; after the entry's marker is
+rewritten to `exempt`, a third install must download and verify again. The
+job `rejects` runs the action's script on invalid inputs (a malformed
+version, repo, bin or exemption, `latest` older than `attested-from`, an
+exemption without an end, a binary or release that does not exist) and checks
+each fails with its own error and before downloading an archive.
 
 ### What's NOT covered by any of the above
 

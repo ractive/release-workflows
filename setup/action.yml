@@ -1,0 +1,399 @@
+name: Install a ractive release binary
+description: >-
+  Install a prebuilt binary from a GitHub release built by
+  ractive/release-workflows' release.yml, after checking it against the
+  release's SHA256SUMS and its build-provenance attestation, and add it to PATH.
+author: ractive
+branding:
+  icon: download
+  color: blue
+
+inputs:
+  repo:
+    description: >-
+      The repository whose release to install, as owner/name (e.g.
+      ractive/ff-rdp). Its release.yml must call this repo's release.yml,
+      which names the archives <bin>-<tag>-<target>.tar.gz (.zip on Windows)
+      and publishes SHA256SUMS next to them.
+    required: true
+  bin:
+    description: >-
+      The binary's name inside the archive, without .exe. Defaults to the
+      name part of 'repo'.
+    required: false
+    default: ""
+  version:
+    description: >-
+      Release to install: "latest" (default) for the newest release, or an
+      explicit tag like "v1.2.3" to pin.
+    required: false
+    default: latest
+  github-token:
+    description: >-
+      Token for the GitHub API calls (raises the anonymous rate limit) and
+      for fetching the archive's build-provenance attestation. Defaults to
+      the workflow token.
+    required: false
+    default: ${{ github.token }}
+  verify-attestation:
+    description: >-
+      Verify the downloaded archive's GitHub build-provenance attestation with
+      `gh attestation verify` before installing it (default "true"). Fails the
+      step if the attestation is missing or doesn't verify. Set "false" only on
+      runners without the gh CLI; integrity then rests on SHA256SUMS alone,
+      which an attacker who can replace release assets can replace too.
+    required: false
+    default: "true"
+  attested-from:
+    description: >-
+      The first release whose archives carry attestations (a tag like
+      "v0.18.0"). An older pinned release installs after the SHA256SUMS check
+      only, with a warning; "latest" resolving to one fails. Empty (default):
+      every release must verify.
+    required: false
+    default: ""
+  unattested-targets:
+    description: >-
+      Space-separated targets (e.g. "aarch64-unknown-linux-gnu") whose
+      archives carry no attestation in releases up to 'unattested-through'.
+      Those install after the SHA256SUMS check only, with a warning. Empty
+      (default): no exemption. List only targets this action picks: on Linux
+      a musl target is picked only where the release ships no gnu build for
+      that arch. The pick reads SHA256SUMS, which whoever can replace assets
+      can edit, so exempting a musl target whose gnu sibling exists would let
+      them drop the gnu line and get an unverified musl archive installed.
+    required: false
+    default: ""
+  unattested-through:
+    description: >-
+      The last release (a tag) the 'unattested-targets' exemption covers.
+      Every newer release must verify for those targets too, so the
+      exemption ends by itself. Required when 'unattested-targets' is set.
+    required: false
+    default: ""
+
+outputs:
+  version:
+    description: The release tag that was installed (e.g. v1.2.3).
+    value: ${{ steps.install.outputs.version }}
+  provenance:
+    description: >-
+      How the installed binary's build provenance was established: "verified"
+      (attestation checked), "exempt" (a release/target that publishes no
+      attestation, per 'attested-from' or 'unattested-targets'; SHA256SUMS
+      only, with a warning) or "disabled" (verify-attestation is false).
+    value: ${{ steps.install.outputs.provenance }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        GH_HOST: github.com
+        INPUT_REPO: ${{ inputs.repo }}
+        INPUT_BIN: ${{ inputs.bin }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_VERIFY_ATTESTATION: ${{ inputs.verify-attestation }}
+        INPUT_ATTESTED_FROM: ${{ inputs.attested-from }}
+        INPUT_UNATTESTED_TARGETS: ${{ inputs.unattested-targets }}
+        INPUT_UNATTESTED_THROUGH: ${{ inputs.unattested-through }}
+        # The app repo's release.yml calls this repo's reusable release.yml,
+        # so the Sigstore certificate's signer identity is release-workflows,
+        # not the app repo: `gh attestation verify --repo <repo>` alone
+        # rejects every release ("verifying with issuer sigstore.dev").
+        SIGNER_WORKFLOW: ractive/release-workflows/.github/workflows/release.yml
+      run: |
+        set -euo pipefail
+
+        me=setup
+        fail() { echo "::error::${me}: $*"; exit 1; }
+        # shown VALUE: VALUE fit for a log line. A rejected input or API value
+        # is printed with every other character as '?', so an embedded newline
+        # cannot start a line the runner reads as a workflow command.
+        shown() { printf '%s' "$1" | tr -c 'A-Za-z0-9._/ -' '?'; }
+
+        # Inputs and the API's tag are matched with bash's [[ =~ ]], which
+        # anchors ^ and $ to the whole string. `grep -E` matches per line, so
+        # a value with an embedded newline would pass a grep check.
+        tag_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
+        repo_re='^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$'
+        bin_re='^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
+        targets_re='^[A-Za-z0-9_. -]*$'
+
+        # ---- validate the inputs --------------------------------------------
+        if ! [[ "$INPUT_REPO" =~ $repo_re ]]; then
+          fail "invalid 'repo' input '$(shown "$INPUT_REPO")' — expected owner/name"
+        fi
+        owner="${INPUT_REPO%%/*}"
+        name="${INPUT_REPO#*/}"
+        case "$name" in .|..) fail "invalid 'repo' input '$(shown "$INPUT_REPO")'" ;; esac
+        bin="${INPUT_BIN:-$name}"
+        if ! [[ "$bin" =~ $bin_re ]]; then
+          fail "invalid 'bin' input '$(shown "$bin")' — expected a file name such as '${name}'"
+        fi
+        me="setup-${bin}"
+
+        case "$INPUT_VERIFY_ATTESTATION" in
+          true|false) ;;
+          *) fail "invalid 'verify-attestation' input '$(shown "$INPUT_VERIFY_ATTESTATION")' — expected 'true' or 'false'" ;;
+        esac
+        if [ "$INPUT_VERSION" != "latest" ] && ! [[ "$INPUT_VERSION" =~ $tag_re ]]; then
+          fail "invalid 'version' input '$(shown "$INPUT_VERSION")' — expected 'latest' or a tag like 'v1.2.3'"
+        fi
+        if [ -n "$INPUT_ATTESTED_FROM" ] && ! [[ "$INPUT_ATTESTED_FROM" =~ $tag_re ]]; then
+          fail "invalid 'attested-from' input '$(shown "$INPUT_ATTESTED_FROM")' — expected a tag like 'v1.2.3'"
+        fi
+        if ! [[ "$INPUT_UNATTESTED_TARGETS" =~ $targets_re ]]; then
+          fail "invalid 'unattested-targets' input — expected space-separated target triples"
+        fi
+        # Normalised to " t1 t2 " for the word match below (the charset above
+        # leaves no glob or whitespace other than spaces).
+        unattested=" ${INPUT_UNATTESTED_TARGETS} "
+        case "$unattested" in
+          *[!\ ]*)
+            if ! [[ "$INPUT_UNATTESTED_THROUGH" =~ $tag_re ]]; then
+              fail "'unattested-targets' needs 'unattested-through' set to the last unattested release (a tag like 'v1.2.3')"
+            fi ;;
+          *)
+            if [ -n "$INPUT_UNATTESTED_THROUGH" ]; then
+              fail "'unattested-through' is set but 'unattested-targets' is empty"
+            fi ;;
+        esac
+
+        # version_lt A B: true when vX.Y.Z tag A sorts before B (both pre-validated).
+        version_lt() {
+          local a1 a2 a3 b1 b2 b3
+          IFS=. read -r a1 a2 a3 <<< "${1#v}"
+          IFS=. read -r b1 b2 b3 <<< "${2#v}"
+          [ "$a1" -lt "$b1" ] && return 0; [ "$a1" -gt "$b1" ] && return 1
+          [ "$a2" -lt "$b2" ] && return 0; [ "$a2" -gt "$b2" ] && return 1
+          [ "$a3" -lt "$b3" ]
+        }
+
+        # ---- detect runner platform → candidate release targets -------------
+        os="$(uname -s)"
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64)   arch=x86_64 ;;
+          aarch64|arm64)  arch=aarch64 ;;
+          *) fail "unsupported CPU architecture '$arch'" ;;
+        esac
+
+        ext=tar.gz
+        exe="$bin"
+        case "$os" in
+          Linux)
+            # gnu first (the hosted runners' libc), musl when the release
+            # ships no gnu build for this arch — decided from SHA256SUMS.
+            candidates="${arch}-unknown-linux-gnu ${arch}-unknown-linux-musl" ;;
+          Darwin)
+            candidates="${arch}-apple-darwin" ;;
+          MINGW*|MSYS*|CYGWIN*|Windows_NT)
+            candidates="${arch}-pc-windows-msvc"
+            ext=zip
+            exe="${bin}.exe" ;;
+          *) fail "unsupported OS '$os'" ;;
+        esac
+        echo "${me}: runner detected as ${os}/${arch} -> candidate targets: ${candidates}"
+
+        # ---- resolve the version tag ----------------------------------------
+        api="https://api.github.com/repos/${INPUT_REPO}"
+        download="https://github.com/${INPUT_REPO}/releases/download"
+        # Bash 3.2 (macOS runners) errors on "${arr[@]}" for an empty array under
+        # `set -u`, so guard every expansion with the "${arr[@]+...}" idiom.
+        auth=()
+        if [ -n "${GH_TOKEN:-}" ]; then
+          auth=(-H "Authorization: Bearer ${GH_TOKEN}")
+        fi
+
+        if [ "$INPUT_VERSION" = "latest" ]; then
+          # Fetch to a variable first: piping curl into `head` closes the pipe
+          # early, and under `pipefail` curl's write error (exit 23) would abort
+          # the step. Parse the buffered body instead.
+          release_json="$(curl -fsSL ${auth[@]+"${auth[@]}"} -H "Accept: application/vnd.github+json" "${api}/releases/latest")" \
+            || fail "could not fetch the latest release of ${INPUT_REPO} from the GitHub API"
+          version="$(printf '%s' "$release_json" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/' || true)"
+          # The API-resolved tag feeds paths, the download URL, and GITHUB_OUTPUT
+          # (which callers may interpolate into scripts) — hold it to the same
+          # format as the explicit input, so a malformed/spoofed API response
+          # can't smuggle path traversal or shell metacharacters downstream.
+          if ! [[ "$version" =~ $tag_re ]]; then
+            fail "latest release tag '$(shown "$version")' of ${INPUT_REPO} does not look like a version tag (vX.Y.Z)"
+          fi
+        else
+          version="$INPUT_VERSION"
+        fi
+        echo "${me}: installing ${INPUT_REPO} ${version}"
+
+        # ---- provenance policy ----------------------------------------------
+        # SHA256SUMS sits next to the archive in the same release, so it only
+        # catches corruption: whoever can replace the archive can replace the
+        # sums. The Sigstore attestation proves the archive was built by
+        # release-workflows, from the repo at this exact tag, on a
+        # GitHub-hosted runner. Whenever an attestation should exist its absence
+        # is fatal: a warn-and-continue on "not found" would let a swapped asset
+        # (whose new digest has no attestation) straight through.
+        #   required — verify, fail on any error
+        #   exempt   — no attestation was ever published: SHA256SUMS + warning
+        #   disabled — verify-attestation: false
+        # policy_for TARGET sets $policy and $exempt_reason.
+        policy_for() {
+          exempt_reason=""
+          if [ "$INPUT_VERIFY_ATTESTATION" = "false" ]; then
+            policy=disabled
+          elif [ -n "$INPUT_ATTESTED_FROM" ] && version_lt "$version" "$INPUT_ATTESTED_FROM"; then
+            if [ "$INPUT_VERSION" = "latest" ]; then
+              # 'latest' is chosen by the release API, i.e. by whoever controls
+              # the releases — never let it select an unverifiable version.
+              fail "'latest' resolved to ${version}, which predates attested releases (${INPUT_ATTESTED_FROM}) — refusing to install it unverified"
+            fi
+            policy=exempt
+            exempt_reason="${bin} ${version} predates attested releases (${INPUT_ATTESTED_FROM})"
+          else
+            policy=required
+            case "$unattested" in
+              *" $1 "*)
+                if ! version_lt "$INPUT_UNATTESTED_THROUGH" "$version"; then
+                  policy=exempt
+                  exempt_reason="${bin} ${version} publishes no provenance attestation for $1 (attested from releases after ${INPUT_UNATTESTED_THROUGH})"
+                fi ;;
+            esac
+          fi
+        }
+
+        # ---- tool cache -----------------------------------------------------
+        # The marker records how the cached binary's provenance was established
+        # when it entered the cache. An entry is reused only if that is at least
+        # what this run requires; entries without a marker or from a
+        # verify-attestation: false run are re-downloaded and verified. The
+        # path holds owner, repo and bin, so two repos' binaries of the same
+        # name never share an entry on a self-hosted runner. Only the first
+        # candidate that has an entry is looked at, reused or not: a rejected
+        # gnu entry must lead to a fresh download (which picks the target from
+        # SHA256SUMS again), never to a cached musl entry.
+        cache_base="${RUNNER_TOOL_CACHE:-${HOME}/.cache}/release-workflows-setup/${owner}/${name}/${bin}/${version}"
+        marker_name=.release-workflows-setup-provenance
+        hit=false
+        for target in $candidates; do
+          cache_root="${cache_base}/${target}"
+          [ -e "$cache_root" ] || continue
+          if [ ! -x "${cache_root}/${exe}" ]; then
+            echo "${me}: cached ${cache_root} has no ${exe} — re-downloading"
+            rm -rf "$cache_root"
+            break
+          fi
+          policy_for "$target"
+          cached="$(cat "${cache_root}/${marker_name}" 2>/dev/null || true)"
+          case "${policy}:${cached}" in
+            disabled:*|exempt:verified|exempt:exempt|required:verified)
+              hit=true
+              echo "${me}: cache hit at ${cache_root} (provenance: ${cached:-unrecorded})"
+              break ;;
+            *)
+              echo "${me}: cached ${cache_root} has provenance '${cached:-unrecorded}', this run requires '${policy}' — re-downloading"
+              rm -rf "$cache_root"
+              break ;;
+          esac
+        done
+
+        if [ "$hit" = "true" ]; then
+          # An unrecorded entry is only accepted when verification is disabled.
+          provenance="${cached:-disabled}"
+          if [ "$policy" = "exempt" ] && [ "$provenance" = "exempt" ]; then
+            echo "::warning::${me}: ${exempt_reason}; installed after SHA256SUMS check only, provenance NOT verified"
+          fi
+        else
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+
+          # ---- SHA256SUMS: pick the target, then check the archive ----------
+          curl -fsSL ${auth[@]+"${auth[@]}"} -o "${tmp}/SHA256SUMS" "${download}/${version}/SHA256SUMS" \
+            || fail "release ${version} of ${INPUT_REPO} publishes no SHA256SUMS — refusing to install an unverified archive"
+          # sums_for FILE: the digest SHA256SUMS lists for FILE, or nothing.
+          sums_for() {
+            awk -v a="$1" '$2 == a || $2 == "*"a {print $1; exit}' "${tmp}/SHA256SUMS"
+          }
+          target=""
+          for t in $candidates; do
+            if [ -n "$(sums_for "${bin}-${version}-${t}.${ext}")" ]; then
+              target="$t"
+              break
+            fi
+          done
+          if [ -z "$target" ]; then
+            published="$(awk '{sub(/^\*/, "", $2); print $2}' "${tmp}/SHA256SUMS" \
+              | sed -E -n "s/^${bin}-${version}-(.+)\.(tar\.gz|zip)$/\1/p" | tr '\n' ' ')"
+            fail "release ${version} of ${INPUT_REPO} has no ${bin} archive for this runner (looked for: ${candidates}; it publishes: ${published:-none})"
+          fi
+          policy_for "$target"
+          cache_root="${cache_base}/${target}"
+          echo "${me}: target ${target}"
+
+          asset="${bin}-${version}-${target}.${ext}"
+          url="${download}/${version}/${asset}"
+          echo "${me}: downloading ${url}"
+          curl -fsSL ${auth[@]+"${auth[@]}"} -o "${tmp}/${asset}" "$url" \
+            || fail "download failed for ${asset}"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "${tmp}/${asset}" | awk '{print $1}')"
+          else
+            actual="$(shasum -a 256 "${tmp}/${asset}" | awk '{print $1}')"
+          fi
+          expected="$(sums_for "$asset")"
+          if [ "$actual" != "$expected" ]; then
+            fail "checksum mismatch for ${asset} (expected ${expected}, got ${actual})"
+          fi
+          echo "${me}: sha256 verified (${actual})"
+
+          # ---- verify build provenance ------------------------------------
+          provenance="$policy"
+          case "$policy" in
+            exempt)
+              echo "::warning::${me}: ${exempt_reason}; installed after SHA256SUMS check only, provenance NOT verified" ;;
+            required)
+              if ! command -v gh >/dev/null 2>&1; then
+                fail "the gh CLI is required to verify the build-provenance attestation and is not on PATH. Install gh on this runner, or set 'verify-attestation: false' to install without provenance verification."
+              fi
+              if [ -z "${GH_TOKEN:-}" ]; then
+                fail "verifying the build-provenance attestation needs a GitHub token — pass 'github-token', or set 'verify-attestation: false'"
+              fi
+              # --source-ref binds the attestation to this tag: without it, a
+              # genuine archive of an OLDER release (validly attested) swapped
+              # into this release would pass.
+              if ! verify_out="$(gh attestation verify "${tmp}/${asset}" \
+                    --repo "$INPUT_REPO" \
+                    --source-ref "refs/tags/${version}" \
+                    --signer-workflow "$SIGNER_WORKFLOW" \
+                    --deny-self-hosted-runners 2>&1)"; then
+                # Indent gh's output so no line of it can start with '::' and be
+                # read by the runner as a workflow command.
+                printf '%s\n' "$verify_out" | sed 's/^/  gh: /'
+                fail "build-provenance attestation verification FAILED for ${asset} — refusing to install"
+              fi
+              provenance=verified
+              echo "${me}: provenance verified (${INPUT_REPO}@refs/tags/${version}, built by ${SIGNER_WORKFLOW})" ;;
+          esac
+
+          mkdir -p "$cache_root"
+          chmod 0755 "$cache_root"
+          if [ "$ext" = "zip" ]; then
+            unzip -q -o "${tmp}/${asset}" -d "$cache_root"
+          else
+            tar -xzf "${tmp}/${asset}" -C "$cache_root"
+          fi
+          if [ ! -e "${cache_root}/${exe}" ]; then
+            fail "extracted archive did not contain '${exe}'"
+          fi
+          if [ ! -x "${cache_root}/${exe}" ]; then
+            chmod +x "${cache_root}/${exe}" 2>/dev/null || true
+          fi
+          printf '%s\n' "$provenance" > "${cache_root}/${marker_name}"
+        fi
+
+        # ---- expose on PATH + outputs ---------------------------------------
+        echo "$cache_root" >> "$GITHUB_PATH"
+        echo "version=${version}" >> "$GITHUB_OUTPUT"
+        echo "provenance=${provenance}" >> "$GITHUB_OUTPUT"

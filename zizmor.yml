@@ -37,3 +37,20 @@ rules:
       - selftest.yml:256
       # And the Firefox selftest's call of firefox-extension-publish.yml.
       - selftest.yml:294
+      # setup-selftest.yml runs setup/action.yml, the composite action under
+      # test, as `uses: ./setup` in every job. actionlint 1.7.12 rejects
+      # `$/setup` for a step as well ("ref is missing"), so the same conflict
+      # as above. Each job's only checkout is the default one (the run's own
+      # commit, persist-credentials: false) and no step writes to the
+      # workspace before `./setup` is used, so `./` names this commit's action.
+      - setup-selftest.yml
+  github-env:
+    ignore:
+      # setup/action.yml exists to put the binary it installed on PATH: its
+      # one GITHUB_PATH write is the tool-cache directory it extracted the
+      # verified archive into, a path made of RUNNER_TOOL_CACHE and the
+      # validated repo, bin, tag and target. Nothing attacker-controlled
+      # reaches it unvalidated, and the archive is only extracted there after
+      # its SHA256SUMS check and attestation verification. (zizmor matches
+      # ignores by base name; setup/action.yml is this repo's only action.yml.)
+      - action.yml
