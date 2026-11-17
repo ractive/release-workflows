@@ -1,0 +1,191 @@
+# End-to-end test for setup/action.yml, the composite action callers use as
+# `uses: ractive/release-workflows/setup@<tag>`. `uses: ./setup` runs it from
+# this checkout, so a PR tests its own change. Each job installs a real
+# release of hyalo and of ff-rdp on each hosted runner OS, newest and one
+# pinned tag, and checks what it installed and how its provenance was
+# established. setup-hyalo and setup-ff-rdp wrap this action with the same
+# exemption values as below.
+name: Setup selftest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    name: ${{ matrix.tool.repo }} ${{ matrix.version }} on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        version: [latest, pinned]
+        tool:
+          # hyalo ships aarch64-unknown-linux-gnu, so the arm runner gets the
+          # gnu build, unattested through v0.26.0: the pinned job takes the
+          # exempt path there and must verify everywhere else.
+          - repo: ractive/hyalo
+            bin: hyalo
+            pinned: v0.18.0
+            attested-from: v0.18.0
+            unattested-targets: aarch64-unknown-linux-gnu
+            unattested-through: v0.26.0
+            arm-target: aarch64-unknown-linux-gnu
+          # ff-rdp ships no aarch64 gnu build, so the arm runner falls back to
+          # aarch64-unknown-linux-musl, which is attested from v0.5.0 only.
+          - repo: ractive/ff-rdp
+            bin: ff-rdp
+            pinned: v0.4.4
+            attested-from: v0.3.0
+            unattested-targets: x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+            unattested-through: v0.4.4
+            arm-target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install
+        id: setup
+        uses: ./setup
+        with:
+          repo: ${{ matrix.tool.repo }}
+          version: ${{ matrix.version == 'latest' && 'latest' || matrix.tool.pinned }}
+          attested-from: ${{ matrix.tool.attested-from }}
+          unattested-targets: ${{ matrix.tool.unattested-targets }}
+          unattested-through: ${{ matrix.tool.unattested-through }}
+
+      - name: Run the binary
+        shell: bash
+        env:
+          BIN: ${{ matrix.tool.bin }}
+        run: |
+          set -euo pipefail
+          command -v "$BIN"
+          "$BIN" --version
+
+      - name: Check the version, target and provenance
+        shell: bash
+        env:
+          BIN: ${{ matrix.tool.bin }}
+          OS: ${{ matrix.os }}
+          REQUESTED: ${{ matrix.version }}
+          PINNED: ${{ matrix.tool.pinned }}
+          ARM_TARGET: ${{ matrix.tool.arm-target }}
+          RESOLVED: ${{ steps.setup.outputs.version }}
+          PROVENANCE: ${{ steps.setup.outputs.provenance }}
+        run: |
+          set -euo pipefail
+          case "$OS" in
+            ubuntu-latest)    target=x86_64-unknown-linux-gnu ;;
+            ubuntu-24.04-arm) target="$ARM_TARGET" ;;
+            macos-latest)     target=aarch64-apple-darwin ;;
+            windows-latest)   target=x86_64-pc-windows-msvc ;;
+          esac
+          # Written out here rather than derived from the exemption inputs, so
+          # a wrong boundary in the action fails this check: only the pinned
+          # release on the arm runner is exempt, every other job must verify.
+          expected=verified
+          if [ "$REQUESTED" = pinned ]; then
+            [ "$RESOLVED" = "$PINNED" ] || { echo "ERROR: installed $RESOLVED, pinned $PINNED" >&2; exit 1; }
+            [ "$OS" = ubuntu-24.04-arm ] && expected=exempt
+          fi
+          path="$(command -v "$BIN")"
+          echo "resolved=$RESOLVED provenance=$PROVENANCE (expected $expected) path=$path (expected target $target)"
+          case "$path" in
+            */"$target"/*) ;;
+            *) echo "ERROR: $BIN is not the $target build" >&2; exit 1 ;;
+          esac
+          [ "$PROVENANCE" = "$expected" ] || { echo "ERROR: provenance $PROVENANCE, expected $expected" >&2; exit 1; }
+
+      - name: Install again (tool-cache hit)
+        id: cached
+        uses: ./setup
+        with:
+          repo: ${{ matrix.tool.repo }}
+          version: ${{ steps.setup.outputs.version }}
+          attested-from: ${{ matrix.tool.attested-from }}
+          unattested-targets: ${{ matrix.tool.unattested-targets }}
+          unattested-through: ${{ matrix.tool.unattested-through }}
+
+      - name: Check the cache hit kept the provenance
+        shell: bash
+        env:
+          FIRST: ${{ steps.setup.outputs.provenance }}
+          SECOND: ${{ steps.cached.outputs.provenance }}
+        run: |
+          echo "first=$FIRST second=$SECOND"
+          [ "$FIRST" = "$SECOND" ]
+
+  # Inputs the action must refuse. Each attempt is allowed to fail; the last
+  # step checks that every one did.
+  rejects:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: A version that is not a tag
+        id: bad-version
+        continue-on-error: true
+        uses: ./setup
+        with:
+          repo: ractive/ff-rdp
+          version: "0.5.0"
+
+      - name: A repo that is not owner/name
+        id: bad-repo
+        continue-on-error: true
+        uses: ./setup
+        with:
+          repo: ractive/../ff-rdp
+
+      - name: '"latest" older than attested-from'
+        id: latest-unattested
+        continue-on-error: true
+        uses: ./setup
+        with:
+          repo: ractive/ff-rdp
+          attested-from: v999.0.0
+
+      - name: unattested-targets without unattested-through
+        id: open-exemption
+        continue-on-error: true
+        uses: ./setup
+        with:
+          repo: ractive/ff-rdp
+          unattested-targets: aarch64-unknown-linux-musl
+
+      - name: A bin the release does not ship
+        id: no-such-bin
+        continue-on-error: true
+        uses: ./setup
+        with:
+          repo: ractive/ff-rdp
+          bin: no-such-bin
+
+      - name: Check every attempt failed
+        shell: bash
+        env:
+          OUTCOMES: >-
+            ${{ steps.bad-version.outcome }}
+            ${{ steps.bad-repo.outcome }}
+            ${{ steps.latest-unattested.outcome }}
+            ${{ steps.open-exemption.outcome }}
+            ${{ steps.no-such-bin.outcome }}
+        run: |
+          set -euo pipefail
+          echo "outcomes: $OUTCOMES"
+          for o in $OUTCOMES; do
+            [ "$o" = failure ] || { echo "ERROR: an invalid install did not fail" >&2; exit 1; }
+          done

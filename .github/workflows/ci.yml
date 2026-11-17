@@ -1,6 +1,7 @@
 # Self-check: lint this repo's own workflow files with actionlint (syntax +
-# shellcheck) and zizmor (GitHub Actions security static analysis) on every
-# push and pull request.
+# shellcheck) and zizmor (GitHub Actions security static analysis), and the
+# composite action setup/action.yml with zizmor and shellcheck (actionlint
+# reads workflows only), on every push and pull request.
 name: CI
 
 on:
@@ -50,4 +51,21 @@ jobs:
         # Version pinned via `--from zizmor==<version>`; suppressions (if
         # any) live in the committed zizmor.yml, each with a comment
         # explaining why it's a deliberate exception and not a blanket skip.
-        run: uvx --from zizmor==1.32.0 zizmor --config zizmor.yml .github/workflows/
+        run: uvx --from zizmor==1.32.0 zizmor --config zizmor.yml .github/workflows/ setup/action.yml
+
+  shellcheck-setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Shellcheck setup/action.yml's script
+        # yq (mikefarah) and shellcheck are preinstalled on ubuntu-latest.
+        # actionlint runs shellcheck on workflow steps only, not on a
+        # composite action's.
+        run: |
+          set -euo pipefail
+          yq -e '.runs.steps[] | select(.id == "install") | .run' setup/action.yml > "$RUNNER_TEMP/install.sh"
+          shellcheck --version
+          shellcheck -s bash "$RUNNER_TEMP/install.sh"
