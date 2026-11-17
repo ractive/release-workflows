@@ -123,9 +123,13 @@ is called with `curl`.
 | `environment` | string | `"chrome-web-store"` | The caller's environment holding the secrets. |
 | `dry-run`, `dry-run-artifact` | boolean, string | `false`, `""` | Pack and verify the artifact's `store.zip` with its `key.pem` (and compare with its `chrome.crx`); no release, no store. For `selftest.yml`. |
 
-The job reads the caller's **environment** (not repository) secrets and
-variable directly; pass no `secrets:`. Give the environment required
-reviewers and a deployment rule for the release tags only:
+The job reads the caller's **environment** secrets and variable. Pass
+`secrets: inherit`, as with every workflow here: a reusable workflow sees an
+environment's secrets only when the caller passes them on, even though its own
+job runs in that environment, and the caller (outside the environment) cannot
+name them one by one. Without it the job stops at "CWS_CRX_PRIVATE_KEY is not
+set" (a dry run reads no secrets, so the selftest cannot catch it). Give the
+environment required reviewers and a deployment rule for the release tags only:
 
 | Environment secret / variable | What |
 | --- | --- |
@@ -147,6 +151,7 @@ Caller, as a job after the one that creates the release:
   publish:
     needs: release
     uses: ractive/release-workflows/.github/workflows/chrome-extension-publish.yml@vX.Y.Z
+    secrets: inherit
     permissions:
       contents: read
       attestations: read

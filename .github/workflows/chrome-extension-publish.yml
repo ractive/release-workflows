@@ -3,7 +3,8 @@
 # ("Verified CRX uploads"), and submit it for review.
 #
 # One job, in the caller's environment (`environment`, default
-# chrome-web-store), which holds the credentials as environment secrets and
+# chrome-web-store), which holds the credentials as environment secrets (the
+# caller passes `secrets: inherit`, or the job sees none of them) and
 # should have required reviewers and a tag-only deployment rule:
 #
 #   CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN   OAuth client and refresh
