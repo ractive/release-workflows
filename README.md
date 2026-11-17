@@ -29,7 +29,7 @@ duplication is intentional; see the comment at the top of each file.
 | `.github/workflows/edge-extension-publish.yml` | `workflow_call` | Publishes a Chromium extension's store zip from a GitHub release to its Microsoft Edge Add-ons item: the same checks of the zip and its build provenance, then the upload and the submission for certification through the Edge Add-ons API v1.1. See [Edge extensions](#edge-extensions-edge-extension-publishyml). |
 | `.github/workflows/cloudsmith-republish.yml` | `workflow_call` | Standalone Cloudsmith publish — (re)pushes an existing release's `.deb`/`.rpm` assets. For failed cloudsmith jobs or repositories created/renamed after the release ran (release runs pin inputs at tag time). Inputs: `tag`, `cloudsmith-repo`. |
 | `.github/workflows/ci.yml` | `push` to `main`, `pull_request` | Lints this repo's own workflow files with `actionlint` and `zizmor`. |
-| `.github/workflows/selftest.yml` | `push` to `main`, `pull_request` | Calls `release.yml` (from this same repo, at the triggering commit) against the `testdata/fixture-cli` fixture crate in `dry-run` mode — end-to-end validation of the pipeline itself — and `chrome-extension-publish.yml`'s CRX packer against Chrome's. See [Testing](#testing). |
+| `.github/workflows/selftest.yml` | `push` to `main`, `pull_request` | Calls `release.yml` (from this same repo, at the triggering commit) against the `testdata/fixture-cli` fixture crate in `dry-run` mode — end-to-end validation of the pipeline itself — `chrome-extension-publish.yml`'s CRX packer against Chrome's, and `edge-extension-publish.yml`'s checks in dry-run on the same zip. See [Testing](#testing). |
 
 ## `release.yml` inputs
 

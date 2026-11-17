@@ -80,7 +80,7 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     environment: ${{ inputs.environment }}
     # One upload at a time per repository (see chrome-extension-publish.yml);
     # a dry run touches no store and gets a group of its own.
@@ -186,54 +186,69 @@ jobs:
           done
           umask 077
           auth="$RUNNER_TEMP/edge-auth"
-          trap 'rm -f "$auth" "$RUNNER_TEMP/edge-headers"' EXIT
+          headers="$RUNNER_TEMP/edge-headers"
+          body="$RUNNER_TEMP/edge-body"
+          trap 'rm -f "$auth" "$headers" "$body"' EXIT
           echo "::add-mask::$API_KEY"
           # The key stays in a file, so it is in no command line.
           printf 'Authorization: ApiKey %s\nX-ClientID: %s\n' "$API_KEY" "$CLIENT_ID" > "$auth"
           api="https://api.addons.microsoftedge.microsoft.com/v1/products/$PRODUCT_ID/submissions"
 
-          # Starts an operation (202 with its id in Location), then asks for
-          # its status until it is no longer InProgress; prints the last answer.
+          # Microsoft's errorCode and message from the last answer, if any.
+          reason() { jq -r '[.errorCode, .message] | map(select(. != null and . != "")) | join(": ")' "$body" 2>/dev/null || head -c 500 "$body"; }
+
+          # POSTs to $1 (with curl's further arguments) and sets operation_id from
+          # the 202's Location header (an id, or a path ending in it). Anything
+          # else fails with the HTTP status and Microsoft's answer.
+          start() {
+            local what="$1" url="$2" code; shift 2
+            code="$(curl -sS --connect-timeout 20 --max-time 300 -D "$headers" -o "$body" -w '%{http_code}' \
+              -X POST "$url" -H @"$auth" "$@")" || code="${code:-000}"
+            if [ "$code" != 202 ]; then
+              echo "::error::$what answered HTTP $code, not 202: $(reason)"
+              return 1
+            fi
+            operation_id="$(sed -n 's/^[Ll]ocation: *//p' "$headers" | tr -d '\r' | tail -1 | sed 's#.*/##')"
+            test -n "$operation_id" || { echo "::error::$what's answer has no operation id"; return 1; }
+          }
+
+          # Asks for an operation's status until it is no longer InProgress, at
+          # most 8 minutes (both operations fit the job's timeout). A network
+          # error, 408, 429 or 5xx is asked again next round; any other HTTP
+          # error ends it at once (an expired key answers 401).
           wait_for() {
-            local what="$1" status_url="$2" answer status
-            for _ in $(seq 1 60); do
-              # A failed poll (network, a 5xx page) is asked again next round.
-              answer="$(curl -sS --fail --retry 3 --retry-all-errors "$status_url" -H @"$auth" || echo '{"status":"InProgress"}')"
-              status="$(jq -r '.status // empty' <<<"$answer" 2>/dev/null || true)"
-              [ "$status" = InProgress ] || break
+            local what="$1" url="$2" code status=""
+            for _ in $(seq 1 48); do
+              code="$(curl -sS --connect-timeout 20 --max-time 60 -o "$body" -w '%{http_code}' "$url" -H @"$auth")" || code=000
+              case "$code" in
+                200) status="$(jq -r '.status // empty' "$body" 2>/dev/null || true)"
+                     [ "$status" = InProgress ] || break ;;
+                000|408|429|5??) echo "status answered HTTP $code; asking again" ;;
+                *) echo "::error::$what's status answered HTTP $code: $(reason)"; return 1 ;;
+              esac
               sleep 10
             done
-            jq . <<<"$answer" 2>/dev/null || printf '%s\n' "$answer"
+            jq . "$body" 2>/dev/null || true
             test "$status" = Succeeded || {
-              echo "::error::$what ended in '${status:-no status}': $(jq -r '[.errorCode, .message] | map(select(. != null and . != "")) | join(": ")' <<<"$answer" 2>/dev/null)"
+              echo "::error::$what ended in '${status:-no answer}': $(reason)"
               return 1
             }
           }
-          # Sets operation_id from a 202's Location header (an id, or a path
-          # ending in it); fails with the HTTP status otherwise.
-          operation() {
-            local code
-            code="$(sed -n 's/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p' "$RUNNER_TEMP/edge-headers" | tail -1)"
-            test "$code" = 202 || { echo "::error::$1 answered HTTP ${code:-nothing}, not 202"; return 1; }
-            operation_id="$(sed -n 's/^[Ll]ocation: *//p' "$RUNNER_TEMP/edge-headers" | tr -d '\r' | tail -1 | sed 's#.*/##')"
-            test -n "$operation_id" || { echo "::error::$1's answer has no operation id"; return 1; }
+          in_review() {
+            grep -q InProgressSubmission "$body" 2>/dev/null \
+              && echo "::notice::InProgressSubmission: a version is still in certification; run the publish again by hand after it."
+            return 1
           }
 
           echo "uploading store.zip ($VERSION)"
-          curl -sS -D "$RUNNER_TEMP/edge-headers" -o /dev/null -X POST "$api/draft/package" -H @"$auth" \
-            -H 'Content-Type: application/zip' --data-binary @store.zip
-          operation "the upload"
+          start "the upload" "$api/draft/package" -H 'Content-Type: application/zip' --data-binary @store.zip
           wait_for "the upload" "$api/draft/package/operations/$operation_id"
 
           if [ "$SUBMIT" = true ]; then
             notes="${NOTES:-Release $TAG of $GITHUB_REPOSITORY: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG}"
-            curl -sS -D "$RUNNER_TEMP/edge-headers" -o /dev/null -X POST "$api" -H @"$auth" \
-              -H 'Content-Type: application/json' --data "$(jq -n --arg notes "$notes" '{notes: $notes}')"
-            operation "the submission"
-            if ! wait_for "the submission" "$api/operations/$operation_id"; then
-              echo "::notice::InProgressSubmission means a version is still in certification: run the publish again by hand after it."
-              exit 1
-            fi
+            start "the submission" "$api" -H 'Content-Type: application/json' \
+              --data "$(jq -n --arg notes "$notes" '{notes: $notes}')" || in_review
+            wait_for "the submission" "$api/operations/$operation_id" || in_review
             echo "submitted $VERSION for certification" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "uploaded $VERSION to the draft; submit it in Partner Center" >> "$GITHUB_STEP_SUMMARY"
