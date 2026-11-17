@@ -33,3 +33,5 @@ rules:
       - selftest.yml:61
       # The same for the CRX selftest's call of chrome-extension-publish.yml.
       - selftest.yml:242
+      # And the Edge selftest's call of edge-extension-publish.yml.
+      - selftest.yml:256
