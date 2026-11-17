@@ -56,12 +56,14 @@ inputs:
     description: >-
       Space-separated targets (e.g. "aarch64-unknown-linux-gnu") whose
       archives carry no attestation in releases up to 'unattested-through'.
-      Those install after the SHA256SUMS check only, with a warning. Empty
-      (default): no exemption. List only targets this action picks: on Linux
-      a musl target is picked only where the release ships no gnu build for
-      that arch. The pick reads SHA256SUMS, which whoever can replace assets
-      can edit, so exempting a musl target whose gnu sibling exists would let
-      them drop the gnu line and get an unverified musl archive installed.
+      Those install after the SHA256SUMS check only, with a warning;
+      "latest" resolving to one fails. Empty (default): no exemption. List
+      only targets this action picks: on a glibc Linux a musl target is
+      picked only where the release ships no gnu build for that arch, and on
+      a musl Linux (e.g. Alpine) the other way round. The pick reads
+      SHA256SUMS, which whoever can replace assets can edit, so exempting a
+      musl target whose gnu sibling exists would let them drop the gnu line
+      and get an unverified musl archive installed.
     required: false
     default: ""
   unattested-through:
@@ -116,8 +118,10 @@ runs:
 
         # Inputs and the API's tag are matched with bash's [[ =~ ]], which
         # anchors ^ and $ to the whole string. `grep -E` matches per line, so
-        # a value with an embedded newline would pass a grep check.
-        tag_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
+        # a value with an embedded newline would pass a grep check. Each
+        # version component is held to 9 digits, so version_lt's integer
+        # comparisons stay far inside the shell's 64-bit range.
+        tag_re='^v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$'
         repo_re='^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$'
         bin_re='^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
         targets_re='^[A-Za-z0-9_. -]*$'
@@ -185,9 +189,25 @@ runs:
         exe="$bin"
         case "$os" in
           Linux)
-            # gnu first (the hosted runners' libc), musl when the release
-            # ships no gnu build for this arch — decided from SHA256SUMS.
-            candidates="${arch}-unknown-linux-gnu ${arch}-unknown-linux-musl" ;;
+            # The runner's libc first, the other one when the release ships
+            # no build for it on this arch — decided from SHA256SUMS. musl
+            # (e.g. an Alpine container) is told by its dynamic loader, or by
+            # `ldd --version`, which names musl there; everything else is
+            # taken as glibc, the hosted runners' libc.
+            libc=gnu
+            for loader in /lib/ld-musl-*; do
+              [ -e "$loader" ] && libc=musl
+              break
+            done
+            if [ "$libc" = gnu ]; then
+              ldd_out="$(ldd --version 2>&1 || true)"
+              case "$ldd_out" in *musl*) libc=musl ;; esac
+            fi
+            if [ "$libc" = musl ]; then
+              candidates="${arch}-unknown-linux-musl ${arch}-unknown-linux-gnu"
+            else
+              candidates="${arch}-unknown-linux-gnu ${arch}-unknown-linux-musl"
+            fi ;;
           Darwin)
             candidates="${arch}-apple-darwin" ;;
           MINGW*|MSYS*|CYGWIN*|Windows_NT)
@@ -208,13 +228,44 @@ runs:
           auth=(-H "Authorization: Bearer ${GH_TOKEN}")
         fi
 
+        tmp="$(mktemp -d)"
+        stage=""
+        trap 'rm -rf "$tmp" ${stage:+"$stage"}' EXIT
+
+        # Transient failures (timeouts, HTTP 408/429/5xx and, where curl has
+        # --retry-all-errors (7.71+, every hosted runner), dropped or refused
+        # connections) are retried. -f is left out so that an HTTP error is
+        # not a curl error: a 404 is not retried, and its status is reported.
+        curl_retry=(--retry 3)
+        curl_help="$(curl --help all 2>/dev/null || true)"
+        case "$curl_help" in *--retry-all-errors*) curl_retry+=(--retry-all-errors) ;; esac
+        # fetch OUT URL [ACCEPT]: download URL into OUT. On failure, returns 1
+        # with the HTTP status or curl's exit code in $fetch_error.
+        fetch() {
+          local code rc=0
+          code="$(curl -sSL "${curl_retry[@]}" ${auth[@]+"${auth[@]}"} -H "Accept: ${3:-*/*}" \
+            -w '%{http_code}' -o "$1" "$2")" || rc=$?
+          if [ "$rc" -eq 0 ] && [ "$code" = 200 ]; then
+            return 0
+          fi
+          if [ "$rc" -ne 0 ]; then
+            fetch_error="curl exit ${rc}"
+            if [ -n "$code" ] && [ "$code" != 000 ]; then
+              fetch_error="${fetch_error}, HTTP $(shown "$code")"
+            fi
+          else
+            fetch_error="HTTP $(shown "$code")"
+          fi
+          return 1
+        }
+
         if [ "$INPUT_VERSION" = "latest" ]; then
-          # Fetch to a variable first: piping curl into `head` closes the pipe
-          # early, and under `pipefail` curl's write error (exit 23) would abort
-          # the step. Parse the buffered body instead.
-          release_json="$(curl -fsSL ${auth[@]+"${auth[@]}"} -H "Accept: application/vnd.github+json" "${api}/releases/latest")" \
-            || fail "could not fetch the latest release of ${INPUT_REPO} from the GitHub API"
-          version="$(printf '%s' "$release_json" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/' || true)"
+          # Parse the buffered body: piping curl into `head` closes the pipe
+          # early, and under `pipefail` curl's write error (exit 23) would
+          # abort the step.
+          fetch "${tmp}/release.json" "${api}/releases/latest" application/vnd.github+json \
+            || fail "could not fetch the latest release of ${INPUT_REPO} from the GitHub API (${fetch_error})"
+          version="$(grep '"tag_name"' "${tmp}/release.json" | head -1 | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/' || true)"
           # The API-resolved tag feeds paths, the download URL, and GITHUB_OUTPUT
           # (which callers may interpolate into scripts) — hold it to the same
           # format as the explicit input, so a malformed/spoofed API response
@@ -256,6 +307,11 @@ runs:
             case "$unattested" in
               *" $1 "*)
                 if ! version_lt "$INPUT_UNATTESTED_THROUGH" "$version"; then
+                  # As above: 'latest' must never select an unverifiable
+                  # release, whichever exemption would cover it.
+                  if [ "$INPUT_VERSION" = "latest" ]; then
+                    fail "'latest' resolved to ${version}, which 'unattested-targets' exempts for $1 (through ${INPUT_UNATTESTED_THROUGH}) — refusing to install it unverified"
+                  fi
                   policy=exempt
                   exempt_reason="${bin} ${version} publishes no provenance attestation for $1 (attested from releases after ${INPUT_UNATTESTED_THROUGH})"
                 fi ;;
@@ -265,52 +321,55 @@ runs:
 
         # ---- tool cache -----------------------------------------------------
         # The marker records how the cached binary's provenance was established
-        # when it entered the cache. An entry is reused only if that is at least
-        # what this run requires; entries without a marker or from a
-        # verify-attestation: false run are re-downloaded and verified. The
-        # path holds owner, repo and bin, so two repos' binaries of the same
-        # name never share an entry on a self-hosted runner. Only the first
-        # candidate that has an entry is looked at, reused or not: a rejected
-        # gnu entry must lead to a fresh download (which picks the target from
-        # SHA256SUMS again), never to a cached musl entry.
+        # when it entered the cache. An entry is reused only if it has the
+        # binary and a marker, and the marker is at least what this run
+        # requires; any other entry is re-downloaded and verified. An entry is
+        # built in a sibling directory and renamed into place with its marker
+        # already written, so a job that dies half-way leaves no entry, and two
+        # jobs installing the same release never extract into one directory.
+        # The path holds owner, repo and bin, so two repos' binaries of the
+        # same name never share an entry on a self-hosted runner. Only the
+        # first candidate that has an entry is looked at, reused or not: a
+        # rejected gnu entry must lead to a fresh download (which picks the
+        # target from SHA256SUMS again), never to a cached musl entry.
         cache_base="${RUNNER_TOOL_CACHE:-${HOME}/.cache}/release-workflows-setup/${owner}/${name}/${bin}/${version}"
         marker_name=.release-workflows-setup-provenance
+        # entry_ok DIR: true when DIR holds the binary and a marker that meets
+        # $policy; sets $cached to the marker (or nothing).
+        entry_ok() {
+          cached="$(cat "$1/${marker_name}" 2>/dev/null || true)"
+          [ -x "$1/${exe}" ] || return 1
+          case "${policy}:${cached}" in
+            disabled:verified|disabled:exempt|disabled:disabled) return 0 ;;
+            exempt:verified|exempt:exempt|required:verified) return 0 ;;
+          esac
+          return 1
+        }
         hit=false
         for target in $candidates; do
           cache_root="${cache_base}/${target}"
           [ -e "$cache_root" ] || continue
-          if [ ! -x "${cache_root}/${exe}" ]; then
-            echo "${me}: cached ${cache_root} has no ${exe} — re-downloading"
-            rm -rf "$cache_root"
-            break
-          fi
           policy_for "$target"
-          cached="$(cat "${cache_root}/${marker_name}" 2>/dev/null || true)"
-          case "${policy}:${cached}" in
-            disabled:*|exempt:verified|exempt:exempt|required:verified)
-              hit=true
-              echo "${me}: cache hit at ${cache_root} (provenance: ${cached:-unrecorded})"
-              break ;;
-            *)
-              echo "${me}: cached ${cache_root} has provenance '${cached:-unrecorded}', this run requires '${policy}' — re-downloading"
-              rm -rf "$cache_root"
-              break ;;
-          esac
+          if entry_ok "$cache_root"; then
+            hit=true
+            echo "${me}: cache hit at ${cache_root} (provenance: ${cached})"
+          else
+            echo "${me}: cached ${cache_root} has provenance '$(shown "${cached:-none}")' or no ${exe}, this run requires '${policy}' — re-downloading"
+            rm -rf "$cache_root"
+          fi
+          break
         done
 
         if [ "$hit" = "true" ]; then
-          # An unrecorded entry is only accepted when verification is disabled.
-          provenance="${cached:-disabled}"
-          if [ "$policy" = "exempt" ] && [ "$provenance" = "exempt" ]; then
-            echo "::warning::${me}: ${exempt_reason}; installed after SHA256SUMS check only, provenance NOT verified"
-          fi
+          provenance="$cached"
         else
-          tmp="$(mktemp -d)"
-          trap 'rm -rf "$tmp"' EXIT
-
           # ---- SHA256SUMS: pick the target, then check the archive ----------
-          curl -fsSL ${auth[@]+"${auth[@]}"} -o "${tmp}/SHA256SUMS" "${download}/${version}/SHA256SUMS" \
-            || fail "release ${version} of ${INPUT_REPO} publishes no SHA256SUMS — refusing to install an unverified archive"
+          if ! fetch "${tmp}/SHA256SUMS" "${download}/${version}/SHA256SUMS"; then
+            if [ "$fetch_error" = "HTTP 404" ]; then
+              fail "no SHA256SUMS for release ${version} of ${INPUT_REPO} (HTTP 404: the release does not exist or publishes no SHA256SUMS) — refusing to install an unverified archive"
+            fi
+            fail "could not download SHA256SUMS of release ${version} of ${INPUT_REPO} (${fetch_error})"
+          fi
           # sums_for FILE: the digest SHA256SUMS lists for FILE, or nothing.
           sums_for() {
             awk -v a="$1" '$2 == a || $2 == "*"a {print $1; exit}' "${tmp}/SHA256SUMS"
@@ -323,9 +382,15 @@ runs:
             fi
           done
           if [ -z "$target" ]; then
-            published="$(awk '{sub(/^\*/, "", $2); print $2}' "${tmp}/SHA256SUMS" \
-              | sed -E -n "s/^${bin}-${version}-(.+)\.(tar\.gz|zip)$/\1/p" | tr '\n' ' ')"
-            fail "release ${version} of ${INPUT_REPO} has no ${bin} archive for this runner (looked for: ${candidates}; it publishes: ${published:-none})"
+            # Fixed-string prefix match: bin may contain '.', and no part of
+            # it may be read as a pattern.
+            published="$(awk -v p="${bin}-${version}-" '{
+                f = $2; sub(/^\*/, "", f)
+                if (index(f, p) != 1) next
+                r = substr(f, length(p) + 1)
+                if (sub(/\.tar\.gz$/, "", r) || sub(/\.zip$/, "", r)) printf "%s ", r
+              }' "${tmp}/SHA256SUMS")"
+            fail "release ${version} of ${INPUT_REPO} has no ${bin} archive for this runner (looked for: ${candidates}; it publishes: $(shown "${published:-none}"))"
           fi
           policy_for "$target"
           cache_root="${cache_base}/${target}"
@@ -334,8 +399,8 @@ runs:
           asset="${bin}-${version}-${target}.${ext}"
           url="${download}/${version}/${asset}"
           echo "${me}: downloading ${url}"
-          curl -fsSL ${auth[@]+"${auth[@]}"} -o "${tmp}/${asset}" "$url" \
-            || fail "download failed for ${asset}"
+          fetch "${tmp}/${asset}" "$url" \
+            || fail "download failed for ${asset} (${fetch_error})"
 
           if command -v sha256sum >/dev/null 2>&1; then
             actual="$(sha256sum "${tmp}/${asset}" | awk '{print $1}')"
@@ -351,8 +416,6 @@ runs:
           # ---- verify build provenance ------------------------------------
           provenance="$policy"
           case "$policy" in
-            exempt)
-              echo "::warning::${me}: ${exempt_reason}; installed after SHA256SUMS check only, provenance NOT verified" ;;
             required)
               if ! command -v gh >/dev/null 2>&1; then
                 fail "the gh CLI is required to verify the build-provenance attestation and is not on PATH. Install gh on this runner, or set 'verify-attestation: false' to install without provenance verification."
@@ -377,20 +440,43 @@ runs:
               echo "${me}: provenance verified (${INPUT_REPO}@refs/tags/${version}, built by ${SIGNER_WORKFLOW})" ;;
           esac
 
-          mkdir -p "$cache_root"
-          chmod 0755 "$cache_root"
+          # ---- build the entry beside its place, then rename it in --------
+          mkdir -p "$cache_base"
+          stage="$(mktemp -d "${cache_base}/.${target}.XXXXXX")"
+          chmod 0755 "$stage"
           if [ "$ext" = "zip" ]; then
-            unzip -q -o "${tmp}/${asset}" -d "$cache_root"
+            unzip -q -o "${tmp}/${asset}" -d "$stage"
           else
-            tar -xzf "${tmp}/${asset}" -C "$cache_root"
+            tar -xzf "${tmp}/${asset}" -C "$stage"
           fi
-          if [ ! -e "${cache_root}/${exe}" ]; then
+          if [ ! -e "${stage}/${exe}" ]; then
             fail "extracted archive did not contain '${exe}'"
           fi
-          if [ ! -x "${cache_root}/${exe}" ]; then
-            chmod +x "${cache_root}/${exe}" 2>/dev/null || true
+          if [ ! -x "${stage}/${exe}" ]; then
+            chmod +x "${stage}/${exe}" 2>/dev/null || true
           fi
-          printf '%s\n' "$provenance" > "${cache_root}/${marker_name}"
+          printf '%s\n' "$provenance" > "${stage}/${marker_name}"
+          if [ -e "$cache_root" ] && entry_ok "$cache_root"; then
+            # Another job installed this release meanwhile, with provenance
+            # that meets this run's: use its entry and drop ours.
+            echo "${me}: ${cache_root} was installed by another job meanwhile (provenance: ${cached}) — using it"
+            provenance="$cached"
+          else
+            rm -rf "$cache_root"
+            mv "$stage" "$cache_root"
+            # mv moves into, not onto, a directory that another job created
+            # between the rm and the mv. Drop ours and judge theirs.
+            nested="${cache_root}/${stage##*/}"
+            if [ -e "$nested" ]; then
+              rm -rf "$nested"
+              entry_ok "$cache_root" \
+                || fail "${cache_root} was replaced by another job meanwhile with provenance '$(shown "${cached:-none}")', and this run requires '${policy}'"
+              provenance="$cached"
+            fi
+          fi
+        fi
+        if [ "$policy" = "exempt" ] && [ "$provenance" = "exempt" ]; then
+          echo "::warning::${me}: ${exempt_reason}; installed after SHA256SUMS check only, provenance NOT verified"
         fi
 
         # ---- expose on PATH + outputs ---------------------------------------
