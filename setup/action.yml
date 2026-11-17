@@ -57,7 +57,11 @@ inputs:
       Space-separated targets (e.g. "aarch64-unknown-linux-gnu") whose
       archives carry no attestation in releases up to 'unattested-through'.
       Those install after the SHA256SUMS check only, with a warning. Empty
-      (default): no exemption.
+      (default): no exemption. List only targets this action picks: on Linux
+      a musl target is picked only where the release ships no gnu build for
+      that arch. The pick reads SHA256SUMS, which whoever can replace assets
+      can edit, so exempting a musl target whose gnu sibling exists would let
+      them drop the gnu line and get an unverified musl archive installed.
     required: false
     default: ""
   unattested-through:
@@ -265,13 +269,21 @@ runs:
         # what this run requires; entries without a marker or from a
         # verify-attestation: false run are re-downloaded and verified. The
         # path holds owner, repo and bin, so two repos' binaries of the same
-        # name never share an entry on a self-hosted runner.
+        # name never share an entry on a self-hosted runner. Only the first
+        # candidate that has an entry is looked at, reused or not: a rejected
+        # gnu entry must lead to a fresh download (which picks the target from
+        # SHA256SUMS again), never to a cached musl entry.
         cache_base="${RUNNER_TOOL_CACHE:-${HOME}/.cache}/release-workflows-setup/${owner}/${name}/${bin}/${version}"
         marker_name=.release-workflows-setup-provenance
         hit=false
         for target in $candidates; do
           cache_root="${cache_base}/${target}"
-          [ -x "${cache_root}/${exe}" ] || continue
+          [ -e "$cache_root" ] || continue
+          if [ ! -x "${cache_root}/${exe}" ]; then
+            echo "${me}: cached ${cache_root} has no ${exe} — re-downloading"
+            rm -rf "$cache_root"
+            break
+          fi
           policy_for "$target"
           cached="$(cat "${cache_root}/${marker_name}" 2>/dev/null || true)"
           case "${policy}:${cached}" in
@@ -281,7 +293,8 @@ runs:
               break ;;
             *)
               echo "${me}: cached ${cache_root} has provenance '${cached:-unrecorded}', this run requires '${policy}' — re-downloading"
-              rm -rf "$cache_root" ;;
+              rm -rf "$cache_root"
+              break ;;
           esac
         done
 

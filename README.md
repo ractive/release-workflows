@@ -254,7 +254,7 @@ script runs on the bash 3.2 of macOS runners.
 | `github-token` | `${{ github.token }}` | For the API calls and the attestation fetch. |
 | `verify-attestation` | `true` | `false` skips the attestation check (runners without `gh`); `SHA256SUMS` alone cannot detect replaced assets. |
 | `attested-from` | `""` | First release with attestations. An older pinned release installs after `SHA256SUMS` only, with a warning; `latest` resolving to one fails. Empty: every release must verify. |
-| `unattested-targets` | `""` | Space-separated targets with no attestation up to `unattested-through`; those install after `SHA256SUMS` only, with a warning. |
+| `unattested-targets` | `""` | Space-separated targets with no attestation up to `unattested-through`; those install after `SHA256SUMS` only, with a warning. List only targets the action picks: never a musl target whose arch has a gnu build, since the gnu/musl choice reads `SHA256SUMS`, which whoever can replace assets can edit. |
 | `unattested-through` | `""` | The last release `unattested-targets` covers; newer releases must verify. Required with `unattested-targets`. |
 
 | Output | What |
@@ -792,10 +792,13 @@ values setup-hyalo and setup-ff-rdp pass. Each job runs `<bin> --version`,
 checks the installed target (on arm64 Linux, hyalo's gnu build and ff-rdp's
 musl fallback, as ff-rdp ships no aarch64 gnu build) and the `provenance`
 output: `exempt` only for the pinned release on arm64 Linux, `verified`
-everywhere else. A second install must hit the tool cache with the same
-provenance. The job `rejects` checks the action refuses a malformed version
-or repo, `latest` older than `attested-from`, an exemption without an end,
-and a binary the release does not ship.
+everywhere else. A second install must hit the tool cache (a file planted
+in the entry survives) with the same provenance; after the entry's marker is
+rewritten to `exempt`, a third install must download and verify again. The
+job `rejects` runs the action's script on invalid inputs (a malformed
+version, repo, bin or exemption, `latest` older than `attested-from`, an
+exemption without an end, a binary or release that does not exist) and checks
+each fails with its own error and before downloading an archive.
 
 ### What's NOT covered by any of the above
 

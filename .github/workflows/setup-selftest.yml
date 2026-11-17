@@ -41,11 +41,14 @@ jobs:
             arm-target: aarch64-unknown-linux-gnu
           # ff-rdp ships no aarch64 gnu build, so the arm runner falls back to
           # aarch64-unknown-linux-musl, which is attested from v0.5.0 only.
+          # x86_64-unknown-linux-musl is unattested too, but never picked (the
+          # x86_64 gnu build exists), and exempting it would let an edited
+          # SHA256SUMS steer x86_64 runners to an unverified musl archive.
           - repo: ractive/ff-rdp
             bin: ff-rdp
             pinned: v0.4.4
             attested-from: v0.3.0
-            unattested-targets: x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+            unattested-targets: aarch64-unknown-linux-musl
             unattested-through: v0.4.4
             arm-target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
@@ -107,6 +110,16 @@ jobs:
           esac
           [ "$PROVENANCE" = "$expected" ] || { echo "ERROR: provenance $PROVENANCE, expected $expected" >&2; exit 1; }
 
+      # A sentinel in the cache entry survives a cache hit; a re-download
+      # deletes the entry first.
+      - name: Mark the cache entry
+        shell: bash
+        env:
+          BIN: ${{ matrix.tool.bin }}
+        run: |
+          set -euo pipefail
+          touch "$(dirname "$(command -v "$BIN")")/selftest-sentinel"
+
       - name: Install again (tool-cache hit)
         id: cached
         uses: ./setup
@@ -117,17 +130,50 @@ jobs:
           unattested-targets: ${{ matrix.tool.unattested-targets }}
           unattested-through: ${{ matrix.tool.unattested-through }}
 
-      - name: Check the cache hit kept the provenance
+      - name: Check the cache hit kept the entry and the provenance
         shell: bash
         env:
+          BIN: ${{ matrix.tool.bin }}
           FIRST: ${{ steps.setup.outputs.provenance }}
           SECOND: ${{ steps.cached.outputs.provenance }}
         run: |
+          set -euo pipefail
           echo "first=$FIRST second=$SECOND"
           [ "$FIRST" = "$SECOND" ]
+          dir="$(dirname "$(command -v "$BIN")")"
+          [ -e "$dir/selftest-sentinel" ] || { echo "ERROR: the second install did not hit the cache" >&2; exit 1; }
+          # Downgrade the recorded provenance: a run that requires 'verified'
+          # must not trust an entry that says 'exempt'.
+          echo exempt > "$dir/.release-workflows-setup-provenance"
 
-  # Inputs the action must refuse. Each attempt is allowed to fail; the last
-  # step checks that every one did.
+      - name: Install again (cache entry with weaker provenance)
+        id: downgraded
+        if: steps.setup.outputs.provenance == 'verified'
+        uses: ./setup
+        with:
+          repo: ${{ matrix.tool.repo }}
+          version: ${{ steps.setup.outputs.version }}
+          attested-from: ${{ matrix.tool.attested-from }}
+          unattested-targets: ${{ matrix.tool.unattested-targets }}
+          unattested-through: ${{ matrix.tool.unattested-through }}
+
+      - name: Check the weaker entry was downloaded and verified again
+        if: steps.setup.outputs.provenance == 'verified'
+        shell: bash
+        env:
+          BIN: ${{ matrix.tool.bin }}
+          THIRD: ${{ steps.downgraded.outputs.provenance }}
+        run: |
+          set -euo pipefail
+          dir="$(dirname "$(command -v "$BIN")")"
+          echo "third=$THIRD marker=$(cat "$dir/.release-workflows-setup-provenance")"
+          [ "$THIRD" = verified ]
+          [ ! -e "$dir/selftest-sentinel" ] || { echo "ERROR: the entry with weaker provenance was reused" >&2; exit 1; }
+
+  # Inputs the action must refuse, each checked for its own error message.
+  # The script is run from setup/action.yml directly (yq is preinstalled on
+  # ubuntu-latest), so the cause of each failure can be read; the install
+  # job covers the same script through `uses:`.
   rejects:
     runs-on: ubuntu-latest
     steps:
@@ -135,57 +181,41 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: A version that is not a tag
-        id: bad-version
-        continue-on-error: true
-        uses: ./setup
-        with:
-          repo: ractive/ff-rdp
-          version: "0.5.0"
-
-      - name: A repo that is not owner/name
-        id: bad-repo
-        continue-on-error: true
-        uses: ./setup
-        with:
-          repo: ractive/../ff-rdp
-
-      - name: '"latest" older than attested-from'
-        id: latest-unattested
-        continue-on-error: true
-        uses: ./setup
-        with:
-          repo: ractive/ff-rdp
-          attested-from: v999.0.0
-
-      - name: unattested-targets without unattested-through
-        id: open-exemption
-        continue-on-error: true
-        uses: ./setup
-        with:
-          repo: ractive/ff-rdp
-          unattested-targets: aarch64-unknown-linux-musl
-
-      - name: A bin the release does not ship
-        id: no-such-bin
-        continue-on-error: true
-        uses: ./setup
-        with:
-          repo: ractive/ff-rdp
-          bin: no-such-bin
-
-      - name: Check every attempt failed
-        shell: bash
+      - name: Check each invalid install fails with its own error
         env:
-          OUTCOMES: >-
-            ${{ steps.bad-version.outcome }}
-            ${{ steps.bad-repo.outcome }}
-            ${{ steps.latest-unattested.outcome }}
-            ${{ steps.open-exemption.outcome }}
-            ${{ steps.no-such-bin.outcome }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          echo "outcomes: $OUTCOMES"
-          for o in $OUTCOMES; do
-            [ "$o" = failure ] || { echo "ERROR: an invalid install did not fail" >&2; exit 1; }
-          done
+          yq -e '.runs.steps[] | select(.id == "install") | .run' setup/action.yml > "$RUNNER_TEMP/install.sh"
+          # expect_error WANT VAR=VALUE...: run the script with these inputs
+          # (defaults as in action.yml) and require exit 1 with WANT in the
+          # ::error:: line and no download attempted.
+          expect_error() {
+            local want="$1"; shift
+            local out rc=0
+            out="$(env RUNNER_TOOL_CACHE="$RUNNER_TEMP/cache" GITHUB_OUTPUT=/dev/null GITHUB_PATH=/dev/null \
+              INPUT_REPO=ractive/ff-rdp INPUT_BIN= INPUT_VERSION=latest INPUT_VERIFY_ATTESTATION=true \
+              INPUT_ATTESTED_FROM= INPUT_UNATTESTED_TARGETS= INPUT_UNATTESTED_THROUGH= \
+              SIGNER_WORKFLOW=ractive/release-workflows/.github/workflows/release.yml \
+              "$@" bash "$RUNNER_TEMP/install.sh" 2>&1)" || rc=$?
+            printf '%s\n' "$out" | sed 's/^/    /'
+            [ "$rc" -eq 1 ] || { echo "ERROR: exit $rc, expected 1 ($want)" >&2; exit 1; }
+            printf '%s\n' "$out" | grep -F '::error::' | grep -qF -- "$want" \
+              || { echo "ERROR: no ::error:: with '$want'" >&2; exit 1; }
+            if printf '%s\n' "$out" | grep -q ': downloading '; then
+              echo "ERROR: downloaded before refusing ($want)" >&2; exit 1
+            fi
+            echo "ok: $want"
+          }
+          expect_error "invalid 'version' input '0.5.0'" INPUT_VERSION=0.5.0
+          expect_error "invalid 'version' input 'v1.0.0?x'" "INPUT_VERSION=$(printf 'v1.0.0\nx')"
+          expect_error "invalid 'repo' input 'ractive/../ff-rdp'" INPUT_REPO=ractive/../ff-rdp
+          expect_error "invalid 'bin' input" INPUT_BIN=../x
+          expect_error "invalid 'verify-attestation' input 'yes'" INPUT_VERIFY_ATTESTATION=yes
+          expect_error "invalid 'attested-from' input" INPUT_ATTESTED_FROM=0.3.0
+          expect_error "'latest' resolved to v" INPUT_ATTESTED_FROM=v999.0.0
+          expect_error "'unattested-targets' needs 'unattested-through'" INPUT_UNATTESTED_TARGETS=aarch64-unknown-linux-musl
+          expect_error "'unattested-through' is set but" INPUT_UNATTESTED_THROUGH=v0.4.4
+          expect_error "invalid 'unattested-targets' input" 'INPUT_UNATTESTED_TARGETS=a*'
+          expect_error "has no no-such-bin archive for this runner" INPUT_BIN=no-such-bin
+          expect_error "publishes no SHA256SUMS" INPUT_VERSION=v0.0.1
