@@ -35,6 +35,8 @@ rules:
       - selftest.yml:242
       # And the Edge selftest's call of edge-extension-publish.yml.
       - selftest.yml:256
+      # And the Firefox selftest's call of firefox-extension-publish.yml.
+      - selftest.yml:294
       # setup-selftest.yml runs setup/action.yml, the composite action under
       # test, as `uses: ./setup` in every job. actionlint 1.7.12 rejects
       # `$/setup` for a step as well ("ref is missing"), so the same conflict

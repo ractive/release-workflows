@@ -27,10 +27,11 @@ duplication is intentional; see the comment at the top of each file.
 | `.github/workflows/publish-crates.yml` | `workflow_call` | Standalone crates.io publish loop — the recovery path for when `release.yml`'s `crates-io` job fails after the GitHub release itself has already succeeded. |
 | `.github/workflows/chrome-extension-publish.yml` | `workflow_call` | Publishes a Chrome extension's store zip from a GitHub release to its Chrome Web Store item: checks the zip and its build provenance, signs a CRX with the publisher's key (Verified CRX uploads), uploads and submits it for review. See [Chrome extensions](#chrome-extensions-chrome-extension-publishyml). |
 | `.github/workflows/edge-extension-publish.yml` | `workflow_call` | Publishes a Chromium extension's store zip from a GitHub release to its Microsoft Edge Add-ons item: the same checks of the zip and its build provenance, then the upload and the submission for certification through the Edge Add-ons API v1.1. See [Edge extensions](#edge-extensions-edge-extension-publishyml). |
+| `.github/workflows/firefox-extension-publish.yml` | `workflow_call` | Publishes a Firefox extension's store zip from a GitHub release to its add-on on addons.mozilla.org: the same checks of the zip and its build provenance plus the manifest's gecko id, then the upload, AMO's validation and a new listed version with the release's source archive, submitted for review, through AMO's API v5. See [Firefox extensions](#firefox-extensions-firefox-extension-publishyml). |
 | `.github/workflows/cloudsmith-republish.yml` | `workflow_call` | Standalone Cloudsmith publish — (re)pushes an existing release's `.deb`/`.rpm` assets. For failed cloudsmith jobs or repositories created/renamed after the release ran (release runs pin inputs at tag time). Inputs: `tag`, `cloudsmith-repo`. |
 | `setup/action.yml` | composite action (`uses: ractive/release-workflows/setup@<sha>`) | Installs a binary from a `release.yml`-built release into a job after its `SHA256SUMS` and attestation checks, and adds it to `PATH`. See [Installing a release binary](#installing-a-release-binary-setupactionyml). |
 | `.github/workflows/ci.yml` | `push` to `main`, `pull_request` | Lints this repo's own workflow files with `actionlint` and `zizmor`, and `setup/action.yml` with `zizmor` and `shellcheck`. |
-| `.github/workflows/selftest.yml` | `push` to `main`, `pull_request` | Calls `release.yml` (from this same repo, at the triggering commit) against the `testdata/fixture-cli` fixture crate in `dry-run` mode — end-to-end validation of the pipeline itself — `chrome-extension-publish.yml`'s CRX packer against Chrome's, and `edge-extension-publish.yml`'s checks in dry-run on the same zip. See [Testing](#testing). |
+| `.github/workflows/selftest.yml` | `push` to `main`, `pull_request` | Calls `release.yml` (from this same repo, at the triggering commit) against the `testdata/fixture-cli` fixture crate in `dry-run` mode — end-to-end validation of the pipeline itself — `chrome-extension-publish.yml`'s CRX packer against Chrome's, `edge-extension-publish.yml`'s checks in dry-run on the same zip, and `firefox-extension-publish.yml`'s on a Firefox fixture. See [Testing](#testing). |
 | `.github/workflows/setup-selftest.yml` | `push` to `main`, `pull_request`, `workflow_dispatch` | Installs real hyalo and ff-rdp releases with `setup/action.yml` on Linux x64/arm64, macOS and Windows. See [Testing](#testing). |
 
 ## `release.yml` inputs
@@ -210,6 +211,100 @@ Caller, after the job that creates the release:
       tag: ${{ github.ref_name }}
       asset: sitegloss-{version}-store.zip
       product-id: <the item's Product ID>
+      attest-signer-workflow: .github/workflows/release.yml
+```
+
+## Firefox extensions (`firefox-extension-publish.yml`)
+
+Publishes a Firefox store zip to an existing add-on on addons.mozilla.org
+(AMO) as a new version in the listed channel, with the release's source
+archive attached, and so submits it for review. The checks before the upload
+are `chrome-extension-publish.yml`'s (the run is on the tag, the manifest has
+its version, no `key`, no install-time host access, no source maps, the
+attestation verifies, of the source archive too), and the manifest's
+`browser_specific_settings.gecko.id` must be `addon-id`. AMO signs the
+version itself; there is no draft: a version once made is submitted.
+
+Then, with AMO's API v5 and `curl`, each request with a JWT of its own
+(HS256, five minutes at most, AMO's limit):
+
+1. `GET /api/v5/addons/addon/<id>/` — the credentials are valid and the
+   add-on exists; the id percent-encoded (`sitegloss%40ractive.ch`). Any valid
+   key reads a public add-on, so whether the key's account is an author shows
+   only in step 4 (403).
+2. `GET …/versions/v<version>/` — AMO never takes a number twice. If it has
+   this one as a listed version awaiting review or approved (a rerun after a
+   submission that went through), the job ends there, successfully, with a
+   notice. If it has it in any other way (unlisted, as after a
+   `web-ext sign` by hand, or with a rejected file), the job fails: the
+   number is spent and the release needs a higher one.
+3. `POST /api/v5/addons/upload/` (multipart: the zip, `channel=listed`), then
+   `GET /api/v5/addons/upload/<uuid>/` every 10 s until AMO's validator has
+   processed it (until 10 minutes have passed); its messages are shown, and
+   an invalid upload ends the job.
+4. `POST …/versions/` (multipart: `upload`, `approval_notes`, `source`) — the
+   version and its source in one request, so no version is left without its
+   source. Compatibility comes from the manifest, the licence from the
+   previous version.
+
+An HTTP error ends the job at once with AMO's answer; only no answer (a
+network error, or an answer that broke off), 408, 429 or 5xx on a `GET` is
+asked again (5 times in all, 10 s apart). A `GET` has 30 s, a `POST` 240 s.
+
+| Input | Type | Default | What |
+| --- | --- | --- | --- |
+| `tag`, `tag-prefix`, `asset`, `attest-signer-workflow`, `allow-host-permissions` | | | As in `chrome-extension-publish.yml`; the version is a Firefox one (1 to 4 numbers of at most 9 digits). |
+| `source-asset` | string | `""` | The release asset with the source code and the build steps for AMO's reviewers, `{version}` for the version: `sitegloss-{version}-source.zip`; `.zip`, `.tar.gz`, `.tgz` or `.tar.bz2`. Empty attaches none (only for an add-on without minified or bundled code). |
+| `addon-id` | string | `""` | The add-on's id, the manifest's gecko id: `sitegloss@ractive.ch` or `{GUID}`. |
+| `notes` | string | `""` | Notes for the reviewers (`approval_notes`, at most 3000 characters, only Mozilla sees them); empty sends a line naming the release. |
+| `environment` | string | `"firefox-add-ons"` | The caller's environment holding the secrets. |
+| `dry-run`, `dry-run-artifact` | boolean, string | `false`, `""` | Check the artifact's `store.zip` (and the archive in its `source/`) only; no release, no store. For `selftest.yml`. |
+
+Environment secrets (pass `secrets: inherit`, as for Chrome), from AMO →
+Developer Hub → **Manage API Keys**
+(<https://addons.mozilla.org/developers/addon/api/key/>), with the account
+that is an author of the add-on:
+
+| Environment secret | What |
+| --- | --- |
+| `AMO_JWT_ISSUER` | The "JWT issuer", e.g. `user:12345:67`. |
+| `AMO_JWT_SECRET` | The "JWT secret". Keep it out of everything but this environment: it can submit any add-on of the account. |
+
+Once, by hand:
+
+- Submit the first version on AMO (Developer Hub → Submit a New Add-on,
+  "On this site"), with the listing a listed version needs (name, summary,
+  categories, licence) and its source. The API could create an add-on, but
+  this workflow only adds versions to one that exists.
+- The environment `firefox-add-ons` in the caller's repository, with a
+  required reviewer and a deployment rule for the release tags only
+  (`v*`), and the two secrets in it.
+- The source archive: AMO's reviewers rebuild the bundled or minified code
+  from it ([Source code
+  submission](https://extensionworkshop.com/documentation/publish/source-code-submission/)):
+  a README at its top with the operating system, the tools and their
+  versions, and the commands that make the zip's files. The job warns when
+  the archive has no README.
+
+AMO takes a listed version only above the last approved one, and a number
+never twice, not even after the version is deleted; it throttles uploads
+(20 an hour per account).
+
+Caller, after the job that creates the release:
+
+```yaml
+  publish-firefox:
+    needs: release
+    uses: ractive/release-workflows/.github/workflows/firefox-extension-publish.yml@vX.Y.Z
+    secrets: inherit
+    permissions:
+      contents: read
+      attestations: read
+    with:
+      tag: ${{ github.ref_name }}
+      asset: sitegloss-firefox-{version}-store.zip
+      source-asset: sitegloss-{version}-source.zip
+      addon-id: sitegloss@ractive.ch
       attest-signer-workflow: .github/workflows/release.yml
 ```
 
@@ -781,6 +876,11 @@ Chrome's CRX with that key; the two files must be equal byte for byte. The
 upload and the submission are not exercised; a real release is their test.
 The job `edge-selftest` runs `edge-extension-publish.yml` in `dry-run` on the
 same zip: its checks, not the Edge Add-ons API.
+The jobs `amo-fixture` and `firefox-selftest` run `firefox-extension-publish.yml`
+in `dry-run` on a zip of `testdata/fixture-extension-firefox` (a gecko id,
+checked against `addon-id`) and a source archive of it: its checks of the zip
+and the archive, not those of the tag and the inputs (so not the version
+either), and not AMO's API.
 
 ### 4. setup-selftest.yml — real installs with setup/action.yml
 
