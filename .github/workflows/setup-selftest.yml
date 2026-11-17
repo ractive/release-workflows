@@ -217,5 +217,52 @@ jobs:
           expect_error "'unattested-targets' needs 'unattested-through'" INPUT_UNATTESTED_TARGETS=aarch64-unknown-linux-musl
           expect_error "'unattested-through' is set but" INPUT_UNATTESTED_THROUGH=v0.4.4
           expect_error "invalid 'unattested-targets' input" 'INPUT_UNATTESTED_TARGETS=a*'
+          expect_error "invalid 'version' input 'v1234567890.0.0'" INPUT_VERSION=v1234567890.0.0
+          expect_error "invalid 'attested-from' input" INPUT_ATTESTED_FROM=v99999999999999999999.0.0
+          # An exemption that covers whatever 'latest' resolves to must not
+          # apply to it: 'latest' is chosen by whoever controls the releases.
+          expect_error "which 'unattested-targets' exempts for x86_64-unknown-linux-gnu (through v999.0.0)" \
+            INPUT_UNATTESTED_TARGETS=x86_64-unknown-linux-gnu INPUT_UNATTESTED_THROUGH=v999.0.0
           expect_error "has no no-such-bin archive for this runner" INPUT_BIN=no-such-bin
-          expect_error "publishes no SHA256SUMS" INPUT_VERSION=v0.0.1
+          # '.' in bin is matched literally when listing what a release ships.
+          expect_error "it publishes: none" INPUT_BIN=ff.rdp
+          expect_error "(HTTP 404: the release does not exist or publishes no SHA256SUMS)" INPUT_VERSION=v0.0.1
+          expect_error "could not fetch the latest release of ractive/no-such-repo from the GitHub API (HTTP 404)" \
+            INPUT_REPO=ractive/no-such-repo
+
+  # An Alpine container: a musl userland must get the musl build where the
+  # release ships one (ff-rdp's latest ships both x86_64 gnu and musl), and
+  # verify it like any other.
+  musl:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+    steps:
+      - name: Install bash, curl, tar and gh
+        shell: sh
+        run: apk add --no-cache bash curl tar github-cli
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install
+        id: setup
+        uses: ./setup
+        with:
+          repo: ractive/ff-rdp
+
+      - name: Check the musl build was installed and verified
+        shell: bash
+        env:
+          PROVENANCE: ${{ steps.setup.outputs.provenance }}
+        run: |
+          set -euo pipefail
+          path="$(command -v ff-rdp)"
+          ff-rdp --version
+          echo "path=$path provenance=$PROVENANCE"
+          case "$path" in
+            */x86_64-unknown-linux-musl/*) ;;
+            *) echo "ERROR: ff-rdp is not the x86_64-unknown-linux-musl build" >&2; exit 1 ;;
+          esac
+          [ "$PROVENANCE" = verified ] || { echo "ERROR: provenance $PROVENANCE, expected verified" >&2; exit 1; }

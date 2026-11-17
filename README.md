@@ -322,7 +322,9 @@ for the reusable workflows does not apply to it.
 
 For the runner's OS and CPU it picks a target (Linux: `<arch>-unknown-linux-gnu`,
 or `<arch>-unknown-linux-musl` when the release's `SHA256SUMS` lists no gnu
-build; macOS: `<arch>-apple-darwin`; Windows: `<arch>-pc-windows-msvc`, a zip),
+build — the other way round on a musl userland such as an Alpine container,
+told by `/lib/ld-musl-*` or `ldd --version`; macOS: `<arch>-apple-darwin`;
+Windows: `<arch>-pc-windows-msvc`, a zip),
 resolves `latest` through the API, downloads `<bin>-<tag>-<target>.tar.gz`
 (`.zip`), checks it against the release's `SHA256SUMS`, verifies its
 build-provenance attestation, extracts it into the runner's tool cache and
@@ -338,8 +340,11 @@ gh attestation verify <archive> --repo <repo> --source-ref refs/tags/<tag> \
 `release.yml`, not the app repo's; `--source-ref` binds the archive to the tag,
 so a genuine archive of an older release swapped into this one fails. A
 missing or failing attestation fails the step unless the release or target
-is exempted below. Inputs reach the script through `env:` only, and the
-script runs on the bash 3.2 of macOS runners.
+is exempted below. Downloads retry transient failures (timeouts, HTTP
+408/429/5xx, dropped connections) three times, and a failed one is reported
+with its HTTP status or curl exit code, so a tag that does not exist (404)
+reads differently from an outage. Inputs reach the script through `env:`
+only, and the script runs on the bash 3.2 of macOS runners.
 
 | Input | Default | What |
 | --- | --- | --- |
@@ -349,7 +354,7 @@ script runs on the bash 3.2 of macOS runners.
 | `github-token` | `${{ github.token }}` | For the API calls and the attestation fetch. |
 | `verify-attestation` | `true` | `false` skips the attestation check (runners without `gh`); `SHA256SUMS` alone cannot detect replaced assets. |
 | `attested-from` | `""` | First release with attestations. An older pinned release installs after `SHA256SUMS` only, with a warning; `latest` resolving to one fails. Empty: every release must verify. |
-| `unattested-targets` | `""` | Space-separated targets with no attestation up to `unattested-through`; those install after `SHA256SUMS` only, with a warning. List only targets the action picks: never a musl target whose arch has a gnu build, since the gnu/musl choice reads `SHA256SUMS`, which whoever can replace assets can edit. |
+| `unattested-targets` | `""` | Space-separated targets with no attestation up to `unattested-through`; those install after `SHA256SUMS` only, with a warning; `latest` resolving to one fails. List only targets the action picks: never a musl target whose arch has a gnu build (nor, for musl userlands, the reverse), since the gnu/musl choice reads `SHA256SUMS`, which whoever can replace assets can edit. |
 | `unattested-through` | `""` | The last release `unattested-targets` covers; newer releases must verify. Required with `unattested-targets`. |
 
 | Output | What |
@@ -357,11 +362,18 @@ script runs on the bash 3.2 of macOS runners.
 | `version` | The tag installed. |
 | `provenance` | `verified`, `exempt` (an exempted release or target, with a warning) or `disabled` (`verify-attestation: false`). |
 
-A tool-cache entry is reused within a job only if its recorded provenance
-meets what the run requires; otherwise it is downloaded and verified again.
+A tool-cache entry is reused only if it holds the binary and a provenance
+marker that meets what the run requires; otherwise it is downloaded and
+verified again. An entry is extracted into a sibling directory, given its
+marker, and only then renamed into place, so a job that dies half-way leaves
+no entry behind and concurrent jobs on one runner never extract into the same
+directory. The tool cache is trusted like the runner itself: whoever can
+write to it can already replace every other tool on that runner, so a
+binary planted next to a `verified` marker is outside what the action
+defends against.
 
 ```yaml
-- uses: ractive/release-workflows/setup@<full commit sha> # v0.8.0
+- uses: ractive/release-workflows/setup@<full commit sha> # v0.8.1
   id: tool
   with:
     repo: ractive/ff-rdp
@@ -897,8 +909,12 @@ in the entry survives) with the same provenance; after the entry's marker is
 rewritten to `exempt`, a third install must download and verify again. The
 job `rejects` runs the action's script on invalid inputs (a malformed
 version, repo, bin or exemption, `latest` older than `attested-from`, an
-exemption without an end, a binary or release that does not exist) and checks
-each fails with its own error and before downloading an archive.
+exemption without an end, a version component of more than 9 digits,
+`latest` resolving to a release an `unattested-targets` exemption covers, a
+binary, release or repository that does not exist — the last two with their
+HTTP status) and checks each fails with its own error and before downloading
+an archive. The job `musl` installs ff-rdp's latest release in an Alpine
+container and checks it got the `x86_64-unknown-linux-musl` build, verified.
 
 ### What's NOT covered by any of the above
 
