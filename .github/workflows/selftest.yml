@@ -260,3 +260,42 @@ jobs:
       dry-run: true
       dry-run-artifact: crx-fixture
       environment: selftest
+
+  # firefox-extension-publish.yml's checks on a Firefox fixture: the store zip
+  # (version, gecko id against addon-id, no key, no host access, no source
+  # maps) and the source archive (one AMO opens). A dry run stops before
+  # AMO's API: the upload and the version need a real add-on.
+  amo-fixture:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Zip the Firefox fixture and its source
+        run: |
+          set -euo pipefail
+          mkdir -p amo/source
+          (cd testdata/fixture-extension-firefox && zip -qrX "$GITHUB_WORKSPACE/amo/store.zip" .)
+          (cd testdata && zip -qrX "$GITHUB_WORKSPACE/amo/source/fixture-extension-firefox-0.0.1-source.zip" fixture-extension-firefox)
+          unzip -l amo/store.zip
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: amo-fixture
+          path: amo/
+          if-no-files-found: error
+          retention-days: 1
+
+  firefox-selftest:
+    needs: amo-fixture
+    uses: ./.github/workflows/firefox-extension-publish.yml
+    permissions:
+      contents: read
+    with:
+      dry-run: true
+      dry-run-artifact: amo-fixture
+      addon-id: fixture-extension@release-workflows.invalid
+      environment: selftest

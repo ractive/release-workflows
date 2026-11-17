@@ -35,3 +35,5 @@ rules:
       - selftest.yml:242
       # And the Edge selftest's call of edge-extension-publish.yml.
       - selftest.yml:256
+      # And the Firefox selftest's call of firefox-extension-publish.yml.
+      - selftest.yml:294

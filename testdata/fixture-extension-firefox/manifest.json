@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "release-workflows fixture extension (Firefox)",
+  "version": "0.0.1",
+  "description": "Zipped by selftest.yml to run firefox-extension-publish.yml's checks in dry-run.",
+  "background": { "scripts": ["background.js"] },
+  "browser_specific_settings": {
+    "gecko": { "id": "fixture-extension@release-workflows.invalid" }
+  }
+}
