@@ -226,7 +226,7 @@ jobs:
               case "$code" in
                 200) status="$(jq -r '.status // empty' "$body" 2>/dev/null || true)"
                      [ "$status" = InProgress ] || break ;;
-                202) status=InProgress ;;
+                202) status=InProgress; echo "status answered HTTP 202: still in progress" ;;
                 000|408|429|5??) echo "status answered HTTP $code; asking again" ;;
                 *) echo "::error::$what's status answered HTTP $code: $(reason)"; return 1 ;;
               esac
