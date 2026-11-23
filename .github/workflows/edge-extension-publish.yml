@@ -215,7 +215,10 @@ jobs:
           # Asks for an operation's status until it is no longer InProgress, at
           # most 8 minutes (both operations fit the job's timeout). A network
           # error, 408, 429 or 5xx is asked again next round; any other HTTP
-          # error ends it at once (an expired key answers 401).
+          # error ends it at once (an expired key answers 401). A 202 means
+          # still in progress: Microsoft's reference names only 200 with
+          # "InProgress" in the body, but the API answers 202 with an empty
+          # body while the operation runs, as its sample script expects.
           wait_for() {
             local what="$1" url="$2" code status=""
             for _ in $(seq 1 48); do
@@ -223,6 +226,7 @@ jobs:
               case "$code" in
                 200) status="$(jq -r '.status // empty' "$body" 2>/dev/null || true)"
                      [ "$status" = InProgress ] || break ;;
+                202) status=InProgress ;;
                 000|408|429|5??) echo "status answered HTTP $code; asking again" ;;
                 *) echo "::error::$what's status answered HTTP $code: $(reason)"; return 1 ;;
               esac
